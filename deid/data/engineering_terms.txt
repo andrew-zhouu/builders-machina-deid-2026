@@ -25,3 +25,5 @@ tygon mylar nomex tyvek dyneema velcro delrin
 rackmount trapezium mechatronics biorobotics photonics nanotech infotech robotique robotics
 konstruktionslehre normelemente manutencao engenharia arquitetos reprap reprappro mindstorm mindstorms
 openhardware opensource hardware firmware software mechanical electrical pneumatic hydraulic
+jaxa faa easa nato csa tuv vde afnor gost jedec ipc aws api nfpa osha rohs reach mil std
+stanag bsi une nen snv sis ksa gbt ohl cernohl

@@ -33,11 +33,13 @@ mkdir -p "$DEID_WORK"
 
 # 2. dictionary: from metadata first, then completed with identities read from
 #    drawing text (which needs the first dictionary), then the final build
+#    The final build reads the corpus manifest (path, bytes, md5; default: next to
+#    the input folder) so that exact copies of a file are treated alike.
 "$PY" -I "$HERE/deid/build_dict.py" --no-text --out "$D"
 "$PY" -I "$HERE/deid/textharvest.py" --dict "$D/dict.json"
-"$PY" -I "$HERE/deid/build_dict.py" --out "$D"
+"$PY" -I "$HERE/deid/build_dict.py" --out "$D" ${DEID_MANIFEST:+--manifest "$DEID_MANIFEST"}
 
-FLAGS=(--pdftext --pdfextra --logos "$DEID_WORK/pdflogos.json" --previews --creo --zlb --strings --dwg)
+FLAGS=(--scope --pdftext --pdfextra --logos "$DEID_WORK/pdflogos.json" --previews --creo --zlb --strings --dwg --dwgobj)
 LIMITS="$HERE/deid/data/limits_paths_unchanged.txt"
 if [ "$DEID_RENAME" = "all" ]; then
   FLAGS+=(--rename all)

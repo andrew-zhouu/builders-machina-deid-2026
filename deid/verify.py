@@ -101,8 +101,7 @@ def _structure(kind, src, dst):
 def _check(item):
     rel, kind, out_rel = item
     eng = transform._ENGINE
-    eng.group = util.group_of(rel)
-    eng.stats = {}
+    transform.prepare(eng, rel)
     src = os.path.join(util.INPUT, rel)
     dst = os.path.join(_OUT, out_rel)
     res = {"p": out_rel, "k": kind}
@@ -138,12 +137,14 @@ def main(argv):
     ap.add_argument("--zlb", action="store_true")
     ap.add_argument("--strings", action="store_true")
     ap.add_argument("--dwg", action="store_true")
+    ap.add_argument("--dwgobj", action="store_true")
+    ap.add_argument("--scope", action="store_true")
     ap.add_argument("--pdfextra", action="store_true")
     ap.add_argument("--previews", action="store_true")
     ap.add_argument("--logos", default=None)
     args = ap.parse_args(argv)
     opts = {"rename": args.rename, "pdftext": args.pdftext, "creo": args.creo, "zlb": args.zlb,
-            "strings": args.strings, "dwg": args.dwg, "pdfextra": args.pdfextra,
+            "strings": args.strings, "dwg": args.dwg, "dwgobj": args.dwgobj, "scope": args.scope, "nofallback": True, "pdfextra": args.pdfextra,
             "previews": args.previews, "logos": args.logos}
     bad = 0
     # latest journal record per path

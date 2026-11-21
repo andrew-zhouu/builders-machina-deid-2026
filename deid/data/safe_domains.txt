@@ -24,3 +24,11 @@ gmx.de gmx.net gmx.com web.de t-online.de mail.ru yandex.ru yandex.com aol.com m
 free.fr orange.fr wanadoo.fr laposte.net libero.it sina.com foxmail.com naver.com iki.fi acm.org ieee.org
 ymail.com rocketmail.com hotmail.co.uk hotmail.fr hotmail.de yahoo.co.uk yahoo.fr yahoo.de live.cn
 users.noreply.github.com users.sourceforge.net
+arxiv.org wordpress.com prismstandard.org doi.org springer.com sciencedirect.com elsevier.com
+researchgate.net blogspot.com medium.com zenodo.org osf.io hackaday.io hackaday.com instructables.com
+cern.ch ohwr.org europa.eu nasa.gov esa.int ecss.nl mathworks.com ni.com wiley.com ieee.org nature.com
+biorxiv.org medrxiv.org website-files.com imagekit.io wpmucdn.com edx.org archives.gov
+ti.com st.com onsemi.com vishay.com nxp.com microchip.com analog.com infineon.com digikey.com mouser.com
+ieee.org ieeexplore.ieee.org tcpdf.org vimeo.com youtube.com youtu.be tinyurl.com bit.ly goo.gl google.com drive.google.com docs.google.com
+creativecommons.org wikipedia.org wikimedia.org springerlink.com springer.com mcmaster.com amazon.com aliexpress.com ebay.com
+w3.org adobe.com microsoft.com apple.com python.org cmake.org gnu.org opensource.org apache.org

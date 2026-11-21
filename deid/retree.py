@@ -27,7 +27,7 @@ def main(argv):
     ap.add_argument("--out-journal", required=True)
     ap.add_argument("--dict", default=os.path.join(util.WORK, "dict", "dict.json"))
     ap.add_argument("--key", default=os.path.join(util.WORK, "secret.key"))
-    ap.add_argument("--level", default="owner", choices=("owner", "top"))
+    ap.add_argument("--level", default="owner", choices=("gitowner", "owner", "top"))
     args = ap.parse_args(argv)
     with open(args.key, "rb") as fh:
         eng = E.Engine(args.dict, fh.read())

@@ -9,6 +9,6 @@ mkdir -p "$DEST/code"
 # source only: no caches, no private state
 (cd "$HERE" && find . -type f ! -path '*/__pycache__/*' ! -name '*.pyc' -print0 | \
    xargs -0 -I{} cp --parents {} "$DEST/code/")
-cp "$README" "$DEST/README.txt"
+cp --remove-destination "$README" "$DEST/README.txt"
 echo "code files: $(find "$DEST/code" -type f | wc -l)"
 du -sh "$DEST/code"

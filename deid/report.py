@@ -36,15 +36,19 @@ Environment (all paths are examples):
     export DEID_WORK=/data/work            # private state: dictionary, key, journal, temp
     export DEID_OUT=/data/out/corpus       # output corpus
 
-Passes (each is restartable; run Python in isolated mode):
+Whole pipeline in one command (harvest, dictionary, transform, verify, notes):
+    bash code/run_all.sh venv/bin/python         # DEID_RENAME=all renames paths as well
+
+Passes (each is restartable; run Python in isolated mode, see code/README.md):
     venv/bin/python -I code/deid/harvest.py                 # 1. read identity fields from every file
+    venv/bin/python -I code/deid/pdfharvest.py              #    title-block text and repeated images of PDFs
     venv/bin/python -I code/deid/build_dict.py              # 2. build identity dictionary + pseudonyms
-    venv/bin/python -I code/deid/transform.py --out $DEID_OUT   # 3. write the corpus
-    venv/bin/python -I code/deid/census.py                  # 4. demote entries that behave like vocabulary
-    venv/bin/python -I code/deid/build_dict.py              #    (rebuild with demotions, then re-run 3
-                                                            #     for the affected files with --paths)
-    venv/bin/python -I code/deid/verify.py --out $DEID_OUT  # 5. completeness, structure, residual scan
-    venv/bin/python -I code/deid/report.py --out README.txt # 6. this file
+    venv/bin/python -I code/deid/textharvest.py             #    identities completed from drawing text
+    venv/bin/python -I code/deid/build_dict.py              #    final dictionary (reads the corpus manifest
+                                                            #    to treat exact copies of a file alike)
+    venv/bin/python -I code/deid/transform.py --out $DEID_OUT %(flags)s
+    venv/bin/python -I code/deid/verify.py --out $DEID_OUT %(flags)s
+    venv/bin/python -I code/deid/report.py --out README.txt # this file
 
 The pseudonym key ($DEID_WORK/secret.key) is generated on first use and is not
 part of the submission; with a different key the same pipeline produces the
@@ -121,6 +125,7 @@ def main(argv):
     ap.add_argument("--out", default="README.txt")
     ap.add_argument("--attempt", default="1")
     ap.add_argument("--limits", default=None, help="file with the limitations section (optional)")
+    ap.add_argument("--flags", default="[options]", help="transform options used for this build (shown in the notes)")
     args = ap.parse_args(argv)
     recs = {}
     with open(args.journal, encoding="utf-8") as fh:
@@ -144,6 +149,10 @@ def main(argv):
             errors.append((p, r["k"], r["error"]))
         if r.get("note"):
             notes.append((p, r["k"], r["note"]))
+        if r.get("pdfnote"):
+            # pages whose visible text was kept because the rewritten page failed a check
+            for part in r["pdfnote"].split("; "):
+                notes.append((p, r["k"], re.sub(r"page \d+ ", "one page: ", part)))
         if r.get("sw_nofit"):
             notes.append((p, r["k"], "%d stream(s) could not be re-stored in place and were left as they were" % r["sw_nofit"]))
         for m in r.get("members") or ():
@@ -151,7 +160,7 @@ def main(argv):
                 errors.append((p + " :: member " + m["m"], m["k"], m["error"]))
             if m.get("note"):
                 notes.append((p + " :: member " + m["m"], m["k"], m["note"]))
-    out = [HEAD % {"attempt": args.attempt}]
+    out = [HEAD % {"attempt": args.attempt, "flags": args.flags}]
     if args.limits and os.path.exists(args.limits):
         out.append(open(args.limits, encoding="utf-8").read())
     else:

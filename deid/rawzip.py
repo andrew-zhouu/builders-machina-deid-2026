@@ -7,8 +7,10 @@ or name changed. The central directory is copied entry by entry with only the
 changed fields patched. Untouched members are therefore bit-identical to the
 input, including their compressed bytes.
 
-Archives that use ZIP64, encryption or spanning are not handled here (the
-caller falls back to the generic rewriter or leaves the file alone).
+Archives that use ZIP64 or spanning are not handled here (the caller falls
+back to the generic rewriter or leaves the file alone). Encrypted members can
+be copied and renamed (their name is not part of the encryption), but their
+content cannot be read or replaced.
 """
 import struct
 import zlib
@@ -52,8 +54,6 @@ def entries(buf):
          eattr, off) = struct.unpack_from("<HHHHHHIIIHHHHHII", buf, p + 4)
         if csize == 0xFFFFFFFF or usize == 0xFFFFFFFF or off == 0xFFFFFFFF:
             raise Unsupported("zip64")
-        if flags & 0x1:
-            raise Unsupported("encrypted")
         name = bytes(buf[p + 46:p + 46 + nlen])
         rec = bytes(buf[p:p + 46 + nlen + xlen + clen])
         lo = off + shift
@@ -72,12 +72,15 @@ def entries(buf):
         out.append({"name": name, "flags": flags, "method": method, "crc": crc, "csize": csize,
                     "usize": usize, "cen": rec, "local": lo, "data": data, "end": end,
                     "lextra": bytes(buf[lo + 30 + lnlen:lo + 30 + lnlen + lxlen]),
-                    "time": (mtime, mdate), "vneed": vneed, "nlen": nlen})
+                    "time": (mtime, mdate), "vneed": vneed, "nlen": nlen, "xlen": xlen,
+                    "enc": bool(flags & 0x1)})
         p += 46 + nlen + xlen + clen
     return out, comment
 
 
 def read_member(buf, e):
+    if e.get("enc"):
+        raise Unsupported("encrypted")
     raw = bytes(buf[e["data"]:e["data"] + e["csize"]])
     if e["method"] == 0:
         data = raw
@@ -89,6 +92,23 @@ def read_member(buf, e):
     if (zlib.crc32(data) & 0xFFFFFFFF) != e["crc"] or len(data) != e["usize"]:
         raise Unsupported("member fails crc")
     return data
+
+
+def _strip_unicode_path(extra):
+    """Drop Info-ZIP Unicode Path fields (0x7075) from an extra block: they
+    repeat the member name and would keep the old one after a rename."""
+    out = bytearray()
+    i = 0
+    n = len(extra)
+    while i + 4 <= n:
+        hid, sz = struct.unpack_from("<HH", extra, i)
+        if i + 4 + sz > n:
+            return bytes(extra)          # malformed block: leave it alone
+        if hid != 0x7075:
+            out += extra[i:i + 4 + sz]
+        i += 4 + sz
+    out += extra[i:]
+    return bytes(out)
 
 
 def rewrite(buf, out, changes, names=None):
@@ -113,37 +133,53 @@ def rewrite(buf, out, changes, names=None):
             pos += e["end"] - e["local"]
             continue
         fresh += 1
-        if idx in changes:
-            data = changes[idx]
-            if e["method"] == 0:
-                method, comp = 0, data
-            else:
-                co = zlib.compressobj(6, zlib.DEFLATED, -15)
-                comp = co.compress(data) + co.flush()
-                method = 8
-            crc = zlib.crc32(data) & 0xFFFFFFFF
-            usize = len(data)
-        else:
-            comp = bytes(buf[e["data"]:e["data"] + e["csize"]])
-            method, crc, usize = e["method"], e["crc"], e["usize"]
+        old = e["cen"]
+        cextra = old[46 + e["nlen"]:46 + e["nlen"] + e["xlen"]]
+        ccomment = old[46 + e["nlen"] + e["xlen"]:]
+        lextra = e["lextra"]
         name = new_name if new_name is not None else e["name"]
+        if new_name is not None:
+            lextra = _strip_unicode_path(lextra)
+            cextra = _strip_unicode_path(cextra)
+        if idx not in changes:
+            # rename only: the record is copied as it is (flags, sizes, the
+            # compressed or encrypted bytes, data descriptor); only the name
+            # and the name length change
+            hdr = bytearray(buf[e["local"]:e["local"] + 30])
+            struct.pack_into("<HH", hdr, 26, len(name), len(lextra))
+            out.write(bytes(hdr) + name + lextra)
+            out.write(buf[e["data"]:e["end"]])
+            rec = bytearray(old[:46])
+            struct.pack_into("<HH", rec, 28, len(name), len(cextra))
+            struct.pack_into("<I", rec, 42, pos)
+            cen.append(bytes(rec) + name + cextra + ccomment)
+            pos += 30 + len(name) + len(lextra) + (e["end"] - e["data"])
+            continue
+        if e["enc"]:
+            raise Unsupported("encrypted member content")
+        data = changes[idx]
+        if e["method"] == 0:
+            method, comp = 0, data
+        else:
+            co = zlib.compressobj(6, zlib.DEFLATED, -15)
+            comp = co.compress(data) + co.flush()
+            method = 8
+        crc = zlib.crc32(data) & 0xFFFFFFFF
+        usize = len(data)
         flags = e["flags"] & ~0x8
         if len(comp) >= 0xFFFFFFFF or usize >= 0xFFFFFFFF:
             raise Unsupported("member too large")
         vneed = 20 if method == 8 else min(e["vneed"], 20)
-        lextra = e["lextra"]
         out.write(_LOC + struct.pack("<HHHHHIIIHH", vneed, flags, method, e["time"][0], e["time"][1], crc,
                                      len(comp), usize, len(name), len(lextra)) + name + lextra)
         out.write(comp)
-        old = e["cen"]
-        tail = old[46 + e["nlen"]:]            # extra + comment of the central record
         rec = bytearray(old[:46])
         struct.pack_into("<H", rec, 6, vneed)
         struct.pack_into("<HH", rec, 8, flags, method)
         struct.pack_into("<III", rec, 16, crc, len(comp), usize)
-        struct.pack_into("<H", rec, 28, len(name))
+        struct.pack_into("<HH", rec, 28, len(name), len(cextra))
         struct.pack_into("<I", rec, 42, pos)
-        cen.append(bytes(rec) + name + tail)
+        cen.append(bytes(rec) + name + cextra + ccomment)
         pos += 30 + len(name) + len(lextra) + len(comp)
     cd_start = pos
     for rec in cen:

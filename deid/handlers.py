@@ -8,6 +8,7 @@ result with an independent re-parse before it is accepted.
 """
 import bisect
 import mmap
+import html
 import os
 import re
 import shutil
@@ -19,7 +20,7 @@ from . import fmt_step, fmt_iges, fmt_sw, oleprops, engine as E
 from .build_dict import label_class, name_class
 
 OPTS = {"rename": False, "pdftext": False, "creo": False, "zlb": False, "strings": False, "dwg": False,
-        "pdfextra": False, "pdfthumbs": True, "previews": False, "logos": None}
+        "dwgobj": False, "scope": False, "nofallback": False, "pdfextra": False, "pdfthumbs": True, "previews": False, "logos": None}
 BLOB_RUN = 160
 _B64 = frozenset(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=")
 
@@ -95,9 +96,15 @@ def xml_ok(buf, n):
         if seg.startswith(b"<!--") or seg.startswith(b"<![CDATA["):
             return True
         dq = seg.count(b'"')
-        if dq:
-            return dq % 2 == 1
-        return seg.count(b"'") % 2 == 1
+        q = b'"' if dq else b"'"
+        if seg.count(q) % 2 != 1:
+            return False
+        # inside a quoted attribute value: never a namespace declaration,
+        # whose URI is a format-required key
+        k = seg.rfind(q)
+        name = seg[:k].rstrip().rstrip(b"=").rstrip()
+        name = name[max(name.rfind(b" "), name.rfind(b"\t"), name.rfind(b"\n"), name.rfind(b"<")) + 1:]
+        return not name.lower().startswith(b"xmlns")
     return ok
 
 
@@ -156,9 +163,12 @@ hh cxx java js mjs ts tsx jsx css scad ino pde m v vhd s asm inc mac lst agc go 
 properties gitignore gitattributes mk cmake make dockerfile license readme authors contributors notice
 changelog todo nfo desc""".split())
 _XML_EXT = frozenset("xml svg html htm xhtml x3d dae rels xsd dtd vml xlf plist kml gpx config vcxproj csproj "
-                     "prjpcb model".split())
+                     "prjpcb model urdf xacro sdf srdf world launch gazebo amf ui qrc xaml resx".split())
 _JSON_EXT = frozenset("json geojson ipynb kicad_pro kicad_prl gbrjob map webmanifest".split())
 _QUOTED_EXT = frozenset("kicad_pcb kicad_sch kicad_mod kicad_sym kicad_wks kicad_dru sch lib dcm".split())
+
+
+_MARKUP_HEAD = re.compile(rb"<(?:!--|[A-Za-z][\w:.-]*(?:\s[^<>]{0,200})?/?>)")
 
 
 def text_rule(kind, name, buf, n):
@@ -171,7 +181,8 @@ def text_rule(kind, name, buf, n):
     if kind == "dxf":
         return dxf_ok(buf, n)
     head = bytes(buf[:256]).lstrip(b"\xef\xbb\xbf \t\r\n")
-    if kind in ("svg", "xml") or ext in _XML_EXT or head.startswith((b"<?xml", b"<svg", b"<!DOCTYPE", b"<html")):
+    if (kind in ("svg", "xml") or ext in _XML_EXT or head.startswith((b"<?xml", b"<svg", b"<!DOCTYPE", b"<html"))
+            or _MARKUP_HEAD.match(head)):
         return xml_ok(buf, n)
     if ext in _JSON_EXT or head[:1] in (b"{", b"["):
         return quoted_ok(buf, n)
@@ -272,7 +283,11 @@ def plan_text(eng, buf, n, kind, name="", anchors=True, fixed=False):
             regs += [r for r in R.scan_emails(buf, n, limit=20000) if r.label == "email.local"]
             regs += [r for r in R.scan_urls(buf, n, limit=20000) if r.label == "url.forge.owner"]
     ids = [(r.start, r.end) for r in regs if r.ctx == "id" and r.omap is None]
-    ids += field_regions(buf, n, kind, name)
+    fields = field_regions(buf, n, kind, name)
+    forced = [(r.start, r.end) for r in regs if r.ctx == "id" and r.omap is None and (
+        r.label == "userpath.user" or label_class(r.label) in ("PERSON", "ACCOUNT"))]
+    forced += fields
+    ids += fields
     ids = sorted(set(ids))
     # drop spans nested in / overlapping an earlier one
     flat = []
@@ -295,7 +310,7 @@ def plan_text(eng, buf, n, kind, name="", anchors=True, fixed=False):
     from . import util as _u
     strict = (fixed or kind == "iges" or text_ok is False
               or _u.split_ext(name) in ("sat", "sab", "x_t", "xmt_txt", "unv", "neu", "brep", "brp"))
-    plan = eng.plan_bytes(buf, ids, text_ok, lo, hi, fixed=strict, wide=False)
+    plan = eng.plan_bytes(buf, ids, text_ok, lo, hi, fixed=strict, wide=False, force_ids=_force(forced))
     taken = set()
     for s, e, _nb in plan:
         taken.update(range(s, e))
@@ -418,6 +433,71 @@ def replace_str(eng, s, ctx="text"):
     return "".join(out)
 
 
+_EMAIL_ANY = re.compile(r"(?<![A-Za-z0-9._%+-])([A-Za-z0-9._%+-]{1,64})\s?@\s?([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)")
+_PHONE_LABELLED = re.compile(
+    r"(?i)\b(?:tel|telephone|phone|fax|mobile|mob|cell|t[ée]l[ée]phone|t[ée]l|telefon|tel[ée]fono|telefono|手机|电话)"
+    r"\b\.?\s*[:：.]?\s*(\+?[\d(][\d\s().\-/]{6,22}\d)")
+_WORDLISTS = []
+
+
+def _lists():
+    if not _WORDLISTS:
+        from .build_dict import Lists
+        _WORDLISTS.append(Lists())
+    return _WORDLISTS[0]
+
+
+def contact_spans(eng, text, taken=()):
+    """Contact details in a real string that the dictionary did not cover:
+    the mailbox and the organisation's domain of e-mail addresses, and
+    telephone numbers that follow a label. Generic mailboxes ("info",
+    "sales"), mail providers and catalogue vendors keep their names. Returns
+    (start, end, replacement) spans that do not overlap `taken`."""
+    from .build_dict import registrable
+    out = []
+    if "@" not in text and not _PHONE_LABELLED.search(text):
+        return out
+    L = _lists()
+
+    def free(a, b):
+        return all(e <= a or s >= b for s, e in taken)
+
+    for m in _EMAIL_ANY.finditer(text):
+        dom = m.group(2)
+        reg, _n = registrable(dom)
+        if not reg:
+            continue
+        a, b = m.span(1)
+        if free(a, b):
+            new, toks = eng.field_pseudonym(m.group(1))
+            if toks:
+                out.append((a, b, new))
+        main = reg.split(".")[0]
+        if reg in L.safe_domains or dom.lower() in L.safe_domains or L.is_vendor(pseudo_tokens(main)):
+            continue
+        k = dom.lower().rfind(reg)
+        if k < 0:
+            continue
+        a2 = m.start(2) + k
+        b2 = a2 + len(main)
+        if free(a2, b2) and len(main) >= 3:
+            new, toks = eng.field_pseudonym(text[a2:b2])
+            if toks:
+                out.append((a2, b2, new))
+    for m in _PHONE_LABELLED.finditer(text):
+        a, b = m.span(1)
+        if free(a, b) and sum(c.isdigit() for c in m.group(1)) >= 7:
+            new = eng.number_pseudonym(m.group(1))
+            if new != m.group(1):
+                out.append((a, b, new))
+    return out
+
+
+def pseudo_tokens(s):
+    from . import pseudo
+    return pseudo.tokens_of(s)
+
+
 _PDF_SKIP = {"/CreationDate", "/ModDate", "/Trapped", "/Producer", "/Creator"}
 
 
@@ -473,50 +553,214 @@ def _replace_logos(doc, logos):
     return count
 
 
-def _pdf_visible_text(eng, src, tmp):
+def _shown_images(page, digests=True):
+    """The images a page actually displays: where each one is drawn and, with
+    digests=True, its content. The resource list is no guide: a rewrite of
+    the page drops entries that were never drawn."""
+    try:
+        out = []
+        for i in page.get_image_info(hashes=digests):
+            bb = tuple(int(round(v)) for v in i.get("bbox", ()))
+            out.append((bb, i.get("digest", b"") if digests else b""))
+        return sorted(out)
+    except Exception:
+        return None
+
+
+def _pdf_visible_text(eng, src, tmp, notes=None):
     """Replace identities in visible page text with PyMuPDF. Writes `tmp` and
-    returns the number of replacements (0: nothing written)."""
+    returns the number of replacements (0: nothing written).
+
+    Every page is handled on its own: a page whose rewrite fails its checks
+    (it lost an image or unrelated words) is left exactly as it was and the
+    rest of the document is still processed. Logo images are replaced after
+    the text, so that the image check of the text step is not disturbed."""
     import pymupdf
     from . import pdftext
-    total = 0
-    doc = pymupdf.open(src)
-    try:
-        if doc.needs_pass or doc.is_encrypted or doc.page_count > 3000:
-            return 0
-        images_before = []
-        touched = []
-        for page in doc:
-            plan = pdftext.page_plan(eng, page)
-            if not plan:
+    skip = set()
+    for _attempt in range(40):
+        total = 0
+        failed = None
+        doc = pymupdf.open(src)
+        try:
+            if doc.needs_pass or doc.is_encrypted or doc.page_count > 3000:
+                return 0
+            for page in doc:
+                if page.number in skip:
+                    continue
+                plan = pdftext.page_plan(eng, page)
+                if not plan:
+                    continue
+                shown = _shown_images(page)
+                try:
+                    n = pdftext.apply_page(page, plan)
+                    if _shown_images(page) != shown:
+                        raise Unsafe("pdf page lost an image")
+                except Exception as ex:
+                    failed = (page.number, "%s:%s" % (type(ex).__name__, str(ex)[:60]))
+                    break
+                total += n
+            if failed is not None:
+                # the page object is already modified in memory: start again
+                # from the file and leave that page alone
+                skip.add(failed[0])
+                if notes is not None:
+                    notes.append("page %d text kept (%s)" % (failed[0] + 1, failed[1]))
                 continue
-            images_before.append((page.number, len(page.get_images())))
-            total += pdftext.apply_page(page, plan)
-            touched.append(page.number)
-        logos = _logo_set(eng.group)
-        if logos:
-            total += _replace_logos(doc, logos)
-        if not total:
-            return 0
-        for num, cnt in images_before:
-            if len(doc[num].get_images()) != cnt:
-                raise Unsafe("pdf page lost an image")
-        doc.save(tmp, garbage=3, deflate=True)
-    finally:
-        doc.close()
-    return total
+            logos = _logo_set(eng.group)
+            for g2 in sorted(eng.extra_groups):       # copies of this document in other folders
+                more = _logo_set(g2)
+                if more:
+                    logos = (logos or frozenset()) | more
+            if logos:
+                try:
+                    total += _replace_logos(doc, logos)
+                except Exception:
+                    pass
+            if not total:
+                return 0
+            want = [(pg.number, _shown_images(pg)) for pg in doc] if doc.page_count <= 400 else []
+            # No garbage collection here: on some files it also drops objects
+            # that pages still draw. Unreachable objects (the old page
+            # content) are dropped by the qpdf rewrite that always follows.
+            doc.save(tmp, garbage=0, deflate=True, no_new_id=True)
+        finally:
+            doc.close()
+        # proof on the written file: every page still displays the same
+        # images at the same places (same content too, unless logo images
+        # were replaced on purpose)
+        bad = None
+        if want:
+            chk = pymupdf.open(tmp)
+            try:
+                if chk.page_count != len(want):
+                    bad = -1
+                else:
+                    orig = pymupdf.open(src)
+                    try:
+                        for num, _mem in want:
+                            if _shown_images(chk[num], not logos) != _shown_images(orig[num], not logos):
+                                bad = num
+                                break
+                    finally:
+                        orig.close()
+            finally:
+                chk.close()
+        if bad is None:
+            return total
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        if bad < 0 or bad in skip:
+            raise Unsafe("pdf text version lost images")
+        skip.add(bad)
+        if notes is not None:
+            notes.append("page %d text kept (images changed on save)" % (bad + 1))
+    return 0
+
+
+def _pdf_scope(eng, src):
+    """Identities named by the document itself: every dictionary entry found
+    in its Info dictionary and XMP identity fields (author, company, ...)."""
+    import pikepdf
+    ids = set()
+    try:
+        with pikepdf.open(src) as pdf:
+            info = pdf.trailer.get("/Info")
+            if isinstance(info, pikepdf.Dictionary):
+                for k in list(info.keys()):
+                    try:
+                        v = info[k]
+                    except Exception:
+                        continue
+                    if not isinstance(v, pikepdf.String) or k in _PDF_SKIP:
+                        continue
+                    key = str(k).lstrip("/").lower()
+                    ctx = "id" if label_class("pdf.info." + key) else "text"
+                    found = eng.match_ids(str(v), ctx)
+                    ids |= found
+                    if ctx == "id" and not found and not OPTS.get("nofallback"):
+                        _new, toks = eng.field_pseudonym(str(v))
+                        if toks:
+                            eng.scope_tokens(toks)
+            try:
+                md = pdf.Root.get("/Metadata")
+                raw = md.read_bytes() if md is not None else b""
+            except Exception:
+                raw = b""
+            for m in _XML_ID.finditer(raw):
+                try:
+                    txt = re.sub(r"<[^>]+>", " ", m.group(2).decode("utf-8", "replace"))
+                except Exception:
+                    continue
+                ids |= eng.match_ids(html.unescape(txt), "id")
+    except Exception:
+        pass
+    return ids
 
 
 def h_pdf(eng, src, dst, name):
+    """PDF: visible text, metadata and the other text surfaces. With document
+    scope, identities named by the document's own metadata are in scope from
+    the start, and identities met while processing are swept once more."""
+    if not OPTS.get("scope"):
+        return _h_pdf_once(eng, src, dst, name)
+    # A PDF is read by people, not resolved by CAD software: a file name
+    # printed in it is text, so the names kept for references are not kept here.
+    eng.no_protect = True
+    try:
+        return _h_pdf_scoped(eng, src, dst, name)
+    finally:
+        eng.no_protect = False
+
+
+def _h_pdf_scoped(eng, src, dst, name):
+    from . import pdftext
+    pdftext.CONTACTS = None if OPTS.get("nofallback") else contact_spans
+    seen = set(eng.stats)
+    eng.scope_promote(_pdf_scope(eng, src))
+    ch, info = _h_pdf_once(eng, src, dst, name)
+    if not ch:
+        return ch, info
+    if eng.scope_promote(set(eng.stats) - seen):
+        tmp2 = dst + ".p2~"
+        os.replace(dst, tmp2)
+        try:
+            ch2, info2 = _h_pdf_once(eng, tmp2, dst, name)
+            if ch2:
+                info = dict(info)
+                info["n"] = info.get("n", 0) + info2.get("n", 0)
+                for k in ("pdftext", "pdfatt"):
+                    if info2.get(k):
+                        info[k] = info.get(k, 0) + info2[k]
+                info["pdfpass"] = 2
+            else:
+                os.replace(tmp2, dst)
+        except Exception:
+            if os.path.exists(tmp2):
+                os.replace(tmp2, dst)
+        finally:
+            try:
+                os.unlink(tmp2)
+            except OSError:
+                pass
+    return ch, info
+
+
+def _h_pdf_once(eng, src, dst, name):
     import pikepdf
     n = 0
     ntext = 0
     orig_src = src
+    notes = []
     if OPTS.get("pdftext"):
         tmp1 = dst + ".txt~"
         try:
-            ntext = _pdf_visible_text(eng, src, tmp1)
-        except Exception:
+            ntext = _pdf_visible_text(eng, src, tmp1, notes)
+        except Exception as ex:
             ntext = 0
+            notes.append("visible text kept (%s:%s)" % (type(ex).__name__, str(ex)[:60]))
             try:
                 os.unlink(tmp1)
             except OSError:
@@ -524,7 +768,24 @@ def h_pdf(eng, src, dst, name):
         if ntext:
             src = tmp1
     try:
-        return _pdf_meta(eng, src, dst, name, ntext, orig_src)
+        try:
+            ch, info = _pdf_meta(eng, src, dst, name, ntext, orig_src)
+        except Exception as ex:
+            if src == orig_src:
+                raise
+            # the rewritten text version does not pass the checks (a damaged
+            # page tree, for instance): keep the page text as it is and still
+            # do the metadata and the other surfaces on the original file
+            notes.append("visible text kept (%s:%s)" % (type(ex).__name__, str(ex)[:60]))
+            try:
+                os.unlink(dst)
+            except OSError:
+                pass
+            ch, info = _pdf_meta(eng, orig_src, dst, name, 0, orig_src)
+        if notes:
+            info = dict(info)
+            info["pdfnote"] = "; ".join(notes[:6])
+        return ch, info
     finally:
         if src != orig_src:
             try:
@@ -546,6 +807,12 @@ def _pdf_extras(eng, pdf, text_changed):
             if isinstance(v, pikepdf.String):
                 s = str(v)
                 new = replace_str(eng, s, ctx)
+                if new == s and ctx == "id" and OPTS.get("scope") and not OPTS.get("nofallback"):
+                    new, toks = eng.field_pseudonym(s)
+                    if toks:
+                        eng.scope_tokens(toks)
+                    else:
+                        new, _t = eng.field_pseudonym(s, force=True)
                 if new != s:
                     obj[key] = pikepdf.String(new)
                     n += 1
@@ -586,6 +853,13 @@ def _pdf_extras(eng, pdf, text_changed):
                     for a in annots:
                         st = str(a.get("/Subtype"))
                         if st in ("/Link",):
+                            # link targets: web addresses and mail links name people and organisations
+                            try:
+                                act = a.get("/A")
+                                if isinstance(act, pikepdf.Dictionary):
+                                    fix(act, "/URI", "text")
+                            except Exception:
+                                pass
                             continue
                         fix(a, "/T", "id" if st != "/Widget" else "text")
                         fix(a, "/Contents", "text")
@@ -601,12 +875,98 @@ def _pdf_extras(eng, pdf, text_changed):
                 continue
     except Exception:
         pass
+    # other text-bearing entries, wherever they are: alternate / actual text
+    # and titles of tagged content, layer names, descriptions, link targets
+    # of actions that are not attached to a page annotation
+    try:
+        count = 0
+        for obj in pdf.objects:
+            count += 1
+            if count > 400000:
+                break
+            try:
+                d = obj.stream_dict if isinstance(obj, pikepdf.Stream) else obj
+                if not isinstance(d, pikepdf.Dictionary):
+                    continue
+                for key in ("/Alt", "/ActualText", "/E", "/TU", "/Subj", "/URI", "/Desc"):
+                    if key in d:
+                        fix(d, key, "text")
+                # a second document-information dictionary (kept by some
+                # producers next to the one the trailer points to)
+                if "/Author" in d or "/Company" in d or "/Manager" in d:
+                    if "/Type" not in d and ("/Producer" in d or "/Creator" in d or "/CreationDate" in d
+                                             or "/ModDate" in d or "/Title" in d):
+                        for key in ("/Author", "/Company", "/Manager"):
+                            if key in d:
+                                fix(d, key, "id")
+                        for key in ("/Title", "/Subject", "/Keywords"):
+                            if key in d:
+                                fix(d, key, "text")
+                typ = d.get("/Type")
+                if typ is not None and str(typ) in ("/OCG", "/StructElem"):
+                    fix(d, "/Name" if str(typ) == "/OCG" else "/T", "text")
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return n
+
+
+# Hook set by transform.py: NESTED(name, data) -> new bytes, or None when the
+# embedded file needs no change. Lets container handlers process embedded
+# files with the full set of format handlers.
+NESTED = None
+
+
+def _pdf_attachments(pdf):
+    """Embedded files (attachments, portfolio members): each one is processed
+    like an archive member by the handler of its own format. The file
+    specification, its name and its position stay as they are; only the
+    stream content, its size and its checksum change. Returns the number of
+    attachments rewritten."""
+    import hashlib
+    import pikepdf
+    if NESTED is None:
+        return 0
+    n = 0
+    try:
+        items = list(pdf.attachments.items())
+    except Exception:
+        return 0
+    done = set()
+    for aname, spec in items[:3000]:
+        try:
+            ef = spec.obj.get("/EF")
+            if ef is None:
+                continue
+            for key in ("/UF", "/F", "/DOS", "/Mac", "/Unix"):
+                st = ef.get(key)
+                if not isinstance(st, pikepdf.Stream) or st.objgen in done:
+                    continue
+                done.add(st.objgen)
+                data = st.read_bytes()
+                if not data or len(data) > (256 << 20):
+                    continue
+                new = NESTED(str(aname), data)
+                if new is None or new == data:
+                    continue
+                st.write(new)
+                params = st.get("/Params")
+                if isinstance(params, pikepdf.Dictionary):
+                    if "/Size" in params:
+                        params["/Size"] = len(new)
+                    if "/CheckSum" in params:
+                        params["/CheckSum"] = pikepdf.String(hashlib.md5(new).digest())
+                n += 1
+        except Exception:
+            continue
     return n
 
 
 def _pdf_meta(eng, src, dst, name, ntext, orig_src):
     import pikepdf
     n = 0
+    fieldmap = {}        # identity-field values replaced in this document: original -> new
     with pikepdf.open(src) as pdf:
         npages = len(pdf.pages)
         info = pdf.trailer.get("/Info")
@@ -622,9 +982,18 @@ def _pdf_meta(eng, src, dst, name, ntext, orig_src):
                 key = str(k).lstrip("/")
                 ctx = "id" if label_class("pdf.info." + key.lower()) else "text"
                 new = replace_str(eng, s, ctx)
+                if new == s and ctx == "id" and OPTS.get("scope") and not OPTS.get("nofallback"):
+                    new, toks = eng.field_pseudonym(s)
+                    if toks:
+                        eng.scope_tokens(toks)
+                    elif label_class("pdf.info." + key.lower()) in ("PERSON", "ACCOUNT"):
+                        # an author that looks like a role or a product is still the author
+                        new, _t = eng.field_pseudonym(s, force=True)
                 if new != s:
                     info[k] = pikepdf.String(new)
                     n += 1
+                    if ctx == "id" and len(s) >= 3:
+                        fieldmap[s] = new
         seen = set()
         cands = []
         try:
@@ -633,6 +1002,21 @@ def _pdf_meta(eng, src, dst, name, ntext, orig_src):
                 cands.append(md)
         except Exception:
             pass
+        if OPTS.get("pdfextra"):
+            # XMP packets attached to pages, images and other objects
+            try:
+                count = 0
+                for obj in pdf.objects:
+                    count += 1
+                    if count > 400000:
+                        break
+                    try:
+                        if isinstance(obj, pikepdf.Stream) and str(obj.stream_dict.get("/Type")) == "/Metadata":
+                            cands.append(obj)
+                    except Exception:
+                        continue
+            except Exception:
+                pass
         nx = 0
         for obj in cands:
             try:
@@ -643,19 +1027,39 @@ def _pdf_meta(eng, src, dst, name, ntext, orig_src):
             except Exception:
                 continue
             plan = plan_text(eng, raw, len(raw), "xml")
+            buf = None
             if plan:
                 buf = bytearray(raw)
                 E.apply_plan(buf, plan)
+            if fieldmap:
+                cur = bytes(buf) if buf is not None else raw
+                upd = cur
+                for old_v, new_v in fieldmap.items():
+                    for esc in (lambda x: x, html.escape):
+                        a = esc(old_v).encode("utf-8")
+                        if a in upd:
+                            upd = upd.replace(a, esc(new_v).encode("utf-8"))
+                if upd != cur:
+                    buf = bytearray(upd)
+            if buf is not None and bytes(buf) != raw:
                 obj.write(bytes(buf))
                 nx += 1
         nextra = 0
+        natt = 0
         if OPTS.get("pdfextra"):
             nextra = _pdf_extras(eng, pdf, ntext > 0)
-        n += nextra
+            natt = _pdf_attachments(pdf)
+        n += nextra + natt
         if not (n or nx or ntext):
             return False, {}
         enc = pdf.is_encrypted
-        pdf.save(dst, encryption=True if enc else False, fix_metadata_version=False)
+        # Same input and same replacements must give the same bytes (the corpus
+        # holds many exact copies of one document): the file identifier is
+        # derived from the content, not from the clock.
+        if enc:
+            pdf.save(dst, encryption=True, fix_metadata_version=False)
+        else:
+            pdf.save(dst, encryption=False, fix_metadata_version=False, deterministic_id=True)
     # validation: same page count as the original input
     with pikepdf.open(orig_src) as o, pikepdf.open(dst) as b:
         if len(b.pages) != len(o.pages):
@@ -680,6 +1084,8 @@ def _pdf_meta(eng, src, dst, name, ntext, orig_src):
     info = {"n": n + nx + ntext}
     if ntext:
         info["pdftext"] = ntext
+    if natt:
+        info["pdfatt"] = natt
     return True, info
 
 
@@ -815,6 +1221,13 @@ def h_sw(eng, src, dst, name):
 # ---------------------------------------------------------------------------
 # OLE compound files (Inventor, Solid Edge, pre-2015 SolidWorks, ...)
 # ---------------------------------------------------------------------------
+def _force(ids):
+    """Identity spans that hold an account or a person and nothing else:
+    replaced even without a dictionary entry (not in second-pass checks,
+    where the value already is a pseudonym)."""
+    return list(ids) if (OPTS.get("scope") and not OPTS.get("nofallback")) else None
+
+
 def plan_propset(eng, data):
     plan = []
     for ps in oleprops.parse(data):
@@ -833,7 +1246,8 @@ def plan_propset(eng, data):
             # other code pages: only pure-ASCII values are safe to rewrite bytewise
             if not seg.isascii():
                 continue
-        sub = eng.plan_bytes(seg, ids, True, fixed=False)
+        sub = eng.plan_bytes(seg, ids, True, fixed=False,
+                             force_ids=_force(ids) if cls in ("PERSON", "ACCOUNT") else None)
         if not sub:
             continue
         if all(len(nb) == e - s for s, e, nb in sub):
@@ -899,10 +1313,11 @@ def string_run_ok(data, n):
     return ok
 
 
-def plan_strings(eng, data):
+def plan_strings(eng, data, ok=None):
     """Plan for an unparsed binary stream: user-name path components, the
     USER / SITE fields of embedded Parasolid headers, and dictionary matches
-    inside text runs. Always same length."""
+    inside text runs. Always same length. `ok` replaces the default
+    text-run predicate (string_run_ok)."""
     n = len(data)
     ids = [(r.start, r.end) for r in R.scan_userpaths(data, n)]
     ids += [(r.start, r.end) for r in R.scan_userpaths_utf16(data, n)]
@@ -921,7 +1336,8 @@ def plan_strings(eng, data):
         if flat and a < flat[-1][1]:
             continue
         flat.append((a, b))
-    return eng.plan_bytes(data, flat, string_run_ok(data, n), fixed=True, wide=True)
+    return eng.plan_bytes(data, flat, ok if ok is not None else string_run_ok(data, n), fixed=True, wide=True,
+                          binary=True, force_ids=_force(flat))
 
 
 _ZLB_GUID = bytes.fromhex("231dd571da8148a2a85898b21b89ef99")
@@ -976,6 +1392,139 @@ _OLE_MFC_STREAMS = ("header2", "biography", "history", "definition", "cmgr", "cm
 def util_ext(name):
     from . import util
     return util.split_ext(name)
+
+
+def _ole_unused(path):
+    """Mask of the bytes of an OLE container that belong to no stream and to
+    no allocation structure: free sectors, and the unused tail behind the end
+    of every stream (regular and mini). Old text survives there when a file
+    was saved many times. Returns a bytearray (1 = in use, do not touch) or
+    None when the layout cannot be established with certainty."""
+    import olefile
+    size = os.path.getsize(path)
+    ole = olefile.OleFileIO(path)
+    try:
+        ss, mss, cutoff = ole.sectorsize, ole.minisectorsize, ole.minisectorcutoff
+        if ole.minifat is None:
+            try:
+                ole.loadminifat()
+            except Exception:
+                pass
+        fat, minifat = list(ole.fat), list(ole.minifat or ())
+        nsect = (size - ss) // ss
+        if ss not in (512, 4096) or nsect <= 0:
+            return None
+        used = bytearray(size)
+        used[0:ss] = b"\x01" * ss
+        for k in range((nsect + 1) * ss, size):
+            used[k] = 1                              # a partial last sector: leave alone
+
+        def chain(start, table, limit):
+            out = []
+            seen = set()
+            cur = start
+            while cur < 0xFFFFFFFC:
+                if cur in seen or cur >= limit or cur >= len(table) or len(out) > limit:
+                    raise ValueError("bad chain")
+                seen.add(cur)
+                out.append(cur)
+                cur = table[cur]
+            return out
+
+        def mark(sect, count=None):
+            off = (sect + 1) * ss
+            n = ss if count is None else count
+            used[off:off + n] = b"\x01" * n
+
+        for i in range(min(nsect, len(fat))):
+            if fat[i] in (0xFFFFFFFD, 0xFFFFFFFC):   # FAT and DIFAT sectors
+                mark(i)
+        for start in (ole.first_dir_sector, ole.first_mini_fat_sector):
+            if start is not None and start < 0xFFFFFFFC:
+                for sct in chain(start, fat, nsect):
+                    mark(sct)
+        root = ole.root
+        mini_container = chain(root.isectStart, fat, nsect) if (root is not None and root.isectStart < 0xFFFFFFFC) else []
+        for d in ole.direntries:
+            if d is None or d.entry_type != olefile.STGTY_STREAM or d.size <= 0:
+                continue
+            if d.size >= cutoff:
+                left = d.size
+                for sct in chain(d.isectStart, fat, nsect):
+                    if left <= 0:
+                        break
+                    mark(sct, min(ss, left))
+                    left -= ss
+                if left > 0:
+                    return None
+            else:
+                left = d.size
+                for m in chain(d.isectStart, minifat, len(minifat) + 1):
+                    if left <= 0:
+                        break
+                    pos = m * mss
+                    idx, inner = divmod(pos, ss)
+                    if idx >= len(mini_container):
+                        return None
+                    off = (mini_container[idx] + 1) * ss + inner
+                    n = min(mss, left)
+                    used[off:off + n] = b"\x01" * n
+                    left -= mss
+                if left > 0:
+                    return None
+        return used
+    except Exception:
+        return None
+    finally:
+        ole.close()
+
+
+def _ole_slack(eng, path):
+    """Replace identities in the unused space of an OLE container (same
+    length, strict text-run rule). Every stream must read back unchanged.
+    Returns the number of replacements."""
+    import olefile
+    used = _ole_unused(path)
+    if used is None or 0 not in used:
+        return 0
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    if len(raw) != len(used) or len(raw) > (512 << 20):
+        return 0
+    plan = [x for x in plan_strings(eng, raw) if len(x[2]) == x[1] - x[0] and not any(used[x[0]:x[1]])]
+    if not plan:
+        return 0
+    before = {}
+    ole = olefile.OleFileIO(path)
+    try:
+        listing = ole.listdir(streams=True, storages=True)
+        for entry in ole.listdir(streams=True, storages=False):
+            try:
+                before[tuple(entry)] = ole.openstream(entry).read()
+            except Exception:
+                return 0
+    finally:
+        ole.close()
+    nd = bytearray(raw)
+    E.apply_plan(nd, plan)
+    tmp = path + ".slack~"
+    with open(tmp, "wb") as fh:
+        fh.write(nd)
+    ok = False
+    try:
+        ole = olefile.OleFileIO(tmp)
+        try:
+            ok = ole.listdir(streams=True, storages=True) == listing and all(
+                ole.openstream(list(e)).read() == d for e, d in before.items())
+        finally:
+            ole.close()
+    except Exception:
+        ok = False
+    if ok:
+        os.replace(tmp, path)
+        return len(plan)
+    os.unlink(tmp)
+    return 0
 
 
 def h_ole(eng, src, dst, name):
@@ -1042,7 +1591,19 @@ def h_ole(eng, src, dst, name):
     finally:
         ole.close()
     if not plans:
-        return False, {}
+        # nothing in the streams: the unused space of the container may still hold old text
+        if not OPTS.get("strings"):
+            return False, {}
+        shutil.copyfile(src, dst)
+        nslack = 0
+        try:
+            nslack = _ole_slack(eng, dst)
+        except Exception:
+            nslack = 0
+        if not nslack or os.path.getsize(dst) != os.path.getsize(src):
+            os.unlink(dst)
+            return False, {}
+        return True, {"n": nslack, "oleslack": nslack}
     shutil.copyfile(src, dst)
     ole = olefile.OleFileIO(dst, write_mode=True)
     try:
@@ -1050,6 +1611,12 @@ def h_ole(eng, src, dst, name):
             ole.write_stream(entry, nd)
     finally:
         ole.close()
+    # Writing a stream whose last sector is cut short by the end of the file
+    # pads that sector; cut the padding off again so the size is unchanged
+    # (the stream comparison below then proves the content is right).
+    osz = os.path.getsize(src)
+    if 0 < os.path.getsize(dst) - osz < 4096:
+        os.truncate(dst, osz)
     # validation: every stream identical to the original except the planned ones
     want = {tuple(e): d for e, d, _c in plans}
     a = olefile.OleFileIO(src)
@@ -1072,7 +1639,16 @@ def h_ole(eng, src, dst, name):
         b.close()
     if os.path.getsize(dst) != os.path.getsize(src):
         raise Unsafe("ole size changed")
-    return True, {"n": sum(c for _e, _d, c in plans)}
+    info = {"n": sum(c for _e, _d, c in plans)}
+    if OPTS.get("strings"):
+        try:
+            nslack = _ole_slack(eng, dst)
+        except Exception:
+            nslack = 0
+        if nslack:
+            info["n"] += nslack
+            info["oleslack"] = nslack
+    return True, info
 
 
 # ---------------------------------------------------------------------------
@@ -1360,9 +1936,15 @@ def cstring_ok(buf, n):
         lim = min(n, pos + 512)
         while b < lim and 0x20 <= buf[b] < 0x7F:
             b += 1
-        if b >= n or buf[b] != 0:
+        if b >= n:
             return False
-        return (b - a) >= 3
+        if buf[b] == 0:
+            return (b - a) >= 3
+        # a complete line of an ASCII section ("3 3 MODEL_NAME\n"): the run
+        # starts right after a line feed and ends with one
+        if buf[b] == 0x0A and a > 0 and buf[a - 1] == 0x0A and (b - a) >= 6:
+            return True
+        return False
     return ok
 
 
@@ -1385,11 +1967,20 @@ def h_creo(eng, src, dst, name):
             i = buf.find(b"user_name\x00", i + 10)
         hdr_end = buf.find(b"#-END_OF_UGC_HEADER", 0, 4096)
         if hdr_end > 0:
-            h = buf.find(b"#- HOST", 0, hdr_end)
-            if h >= 0:
-                e = buf.find(b"\n", h, hdr_end)
-                if e > h + 8:
-                    ids.append((h + 8, e))
+            for field in (b"#- HOST", b"#- DBID"):
+                h = buf.find(field, 0, hdr_end)
+                if h >= 0:
+                    e = buf.find(b"\n", h, hdr_end)
+                    if e > h + 8:
+                        ids.append((h + 8, e))
+        # workstation names in revision comments: Hostname: '<name>'
+        i = buf.find(b"Hostname: '")
+        while i >= 0:
+            a = i + 11
+            b = buf.find(b"'", a, min(size, a + 64))
+            if b > a:
+                ids.append((a, b))
+            i = buf.find(b"Hostname: '", i + 11)
         for r in R.scan_userpaths(buf, size):
             ids.append((r.start, r.end))
         ids = sorted(set(ids))
@@ -1398,8 +1989,29 @@ def h_creo(eng, src, dst, name):
             if flat and a < flat[-1][1]:
                 continue
             flat.append((a, b))
-        plan = eng.plan_bytes(buf, flat, cstring_ok(buf, size), fixed=True, wide=False)
+        plan = eng.plan_bytes(buf, flat, cstring_ok(buf, size), fixed=True, wide=False, binary=True,
+                              force_ids=_force(flat))
         sections = [m for m in (buf.find(b"#END_OF_UGC"), buf.find(b"#UGC_TOC"))]
+        # header: "#- CMNM 01a<file name>" repeats the model's own file name; when
+        # files are renamed it is renamed by the very same function
+        if OPTS.get("rename") == "all" and hdr_end > 0:
+            h = buf.find(b"#- CMNM ", 0, hdr_end)
+            if h >= 0:
+                e = buf.find(b"\n", h, hdr_end)
+                field = bytes(buf[h + 8:e]) if e > h else b""
+                m = re.match(rb"([0-9A-Fa-f]{2}[A-Za-z])([\x21-\x7e][\x20-\x7e]*?)(\s*\\?\r?)$", field)
+                if m:
+                    from . import paths as P
+                    try:
+                        old_name = m.group(2).decode("ascii")
+                        new_name = P.rename_file_component(eng, old_name)
+                    except UnicodeDecodeError:
+                        new_name = old_name = ""
+                    if new_name != old_name and len(new_name) == len(old_name) and new_name.isascii():
+                        a0 = h + 8 + m.start(2)
+                        plan = [x for x in plan if x[1] <= a0 or x[0] >= a0 + len(old_name)]
+                        plan.append((a0, a0 + len(old_name), new_name.encode("ascii")))
+                        plan.sort()
     if not plan:
         return False, {}
     patch_file(src, dst, plan)
@@ -1439,6 +2051,112 @@ def h_xb(eng, src, dst, name):
 # ---------------------------------------------------------------------------
 _DWG_PLAIN_SECTIONS = frozenset(("AcDb:SummaryInfo", "AcDb:AppInfo", "AcDb:AppInfoHistory",
                                  "AcDb:FileDepList", "AcDb:RevHistory"))
+
+
+def _dwg_string_ok(data, n):
+    """Text predicate for bit-shifted views of DWG object data: the general
+    strict rule, plus a complete UTF-16 string that is preceded by its own
+    length (the bit-short length of the DWG text types)."""
+    base = string_run_ok(data, n)
+
+    def ok(s, e):
+        if base(s, e):
+            return True
+        if s + 1 < n and data[s + 1] == 0 and 0x20 <= data[s] < 0x7F:
+            a = s
+            while a >= 2 and data[a - 1] == 0 and 0x20 <= data[a - 2] < 0x7F and s - a < 1600:
+                a -= 2
+            b = s
+            while b + 1 < n and data[b + 1] == 0 and 0x20 <= data[b] < 0x7F and b - s < 1600:
+                b += 2
+            units = (b - a) // 2
+            if a == s and b == e and units >= 5 and a >= 1 and data[a - 1] in (units, units + 1):
+                return True
+        return False
+    ok.span = True
+    return ok
+
+
+def _dwg_object_edits(eng, raw, buf, pagelist, names):
+    """Text inside the bit-packed object data (text entities, attributes,
+    title blocks, stored paths). The section is searched at each of the eight
+    bit alignments; a match is patched at bit level inside the one object
+    that contains it, that object's CRC-16 is recomputed, and the affected
+    pages are rewritten through their literal bytes. Objects on a page that
+    cannot take the change are left exactly as they were.
+    Returns (replacements made, replacements refused)."""
+    import bisect
+    from . import fmt_dwg
+    d, layout = fmt_dwg.section_data(raw, "AcDb:AcDbObjects", pagelist, names)
+    if d is None or len(d) > (96 << 20):
+        return 0, 0
+    spans = fmt_dwg.object_spans(d, raw[:6])
+    if not spans:
+        return 0, 0
+    starts = [sp[1] for sp in spans]
+    edits = []
+    for k in range(8):
+        view = fmt_dwg.shift_view(d, k)
+        for s0, e0, rep in plan_strings(eng, view, ok=_dwg_string_ok(view, len(view))):
+            if len(rep) != e0 - s0:
+                continue
+            bit = 8 * s0 + k
+            j = bisect.bisect_right(starts, bit // 8) - 1
+            if j < 0:
+                continue
+            _st, ds, cp = spans[j]
+            if bit < ds * 8 or bit + 8 * len(rep) > cp * 8:
+                continue                      # not inside the data of one validated object
+            edits.append((bit, bytes(rep), j))
+    if not edits:
+        return 0, 0
+    edits.sort()
+    kept = []
+    end = -1
+    for bit, rep, j in edits:
+        if bit < end:
+            continue                          # overlaps an earlier match
+        kept.append((bit, rep, j))
+        end = bit + 8 * len(rep)
+    blocked = set()
+    for _round in range(6):
+        nd = bytearray(d)
+        touched = set()
+        for bit, rep, j in kept:
+            if j not in blocked:
+                fmt_dwg.put_bits(nd, bit, rep)
+                touched.add(j)
+        if not touched:
+            return 0, len(kept)
+        for j in touched:
+            st, _ds, cp = spans[j]
+            c = fmt_dwg.crc16(nd[st:cp])
+            nd[cp] = c & 0xFF
+            nd[cp + 1] = c >> 8
+        trial = bytearray(buf)
+        failed = []
+        for start, length, pg, mode in layout:
+            if nd[start:start + length] != d[start:start + length]:
+                pgc = dict(pg)
+                pgc["hdr"] = list(pg["hdr"])
+                if not fmt_dwg.rewrite_page(trial, pgc, bytes(nd[start:start + length]), mode):
+                    failed.append((start, start + length))
+        if not failed:
+            # proof: the rewritten file must hold exactly the planned section
+            # content, with every object CRC valid at the same positions
+            d2, _l2 = fmt_dwg.section_data(bytes(trial), "AcDb:AcDbObjects")
+            if d2 != bytes(nd) or fmt_dwg.object_spans(d2, raw[:6]) != spans:
+                raise Unsafe("dwg object data did not verify")
+            buf[:] = trial
+            done = sum(1 for _b, _r, j in kept if j not in blocked)
+            return done, len(kept) - done
+        for a, b in failed:
+            lo = bisect.bisect_left([sp[2] + 2 for sp in spans], a + 1)
+            for j in range(lo, len(spans)):
+                if spans[j][0] >= b:
+                    break
+                blocked.add(j)
+    return 0, len(kept)
 
 
 def h_dwg(eng, src, dst, name):
@@ -1482,6 +2200,11 @@ def h_dwg(eng, src, dst, name):
             n += len(plan)
         else:
             refused += 1
+    nobj = 0
+    if OPTS.get("dwgobj"):
+        nobj, ref2 = _dwg_object_edits(eng, raw, buf, pages, names)
+        n += nobj
+        refused += ref2
     if not n:
         return False, ({"dwg_refused": refused} if refused else {})
     # validation: identical page layout, every checksum valid, same size
@@ -1492,6 +2215,8 @@ def h_dwg(eng, src, dst, name):
     with open(dst, "wb") as fh:
         fh.write(buf)
     info = {"n": n}
+    if nobj:
+        info["dwgobj"] = nobj
     if refused:
         info["dwg_refused"] = refused
     return True, info

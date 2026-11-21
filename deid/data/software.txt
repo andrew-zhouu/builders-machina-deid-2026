@@ -237,3 +237,8 @@ freertos
 cmsis
 stm32
 esp32
+netbsd
+freebsd
+openbsd
+zemax
+opticstudio

@@ -259,7 +259,7 @@ def read_page(buf, page):
     comp = bytes(buf[o + 32:o + 32 + csize])
     try:
         plain, _origin, end = decompress(comp)
-        if csize - end <= 64:
+        if csize - end <= 64 or not any(comp[end:]):
             return plain, "lz"
     except Bad:
         pass
@@ -299,22 +299,375 @@ def rewrite_page(buf, page, new_plain, mode="lz"):
         return False
     if len(new_plain) != len(plain):
         return False
+    new_plain = bytes(new_plain)
+    if new_plain == plain:
+        return False
+    # 1. cheapest and most faithful: change the literal bytes the text comes from
     want = {}
+    simple = True
     for j in range(len(plain)):
         if plain[j] != new_plain[j]:
             src = origin[j]
             if want.get(src, new_plain[j]) != new_plain[j]:
-                return False
+                simple = False
+                break
             want[src] = new_plain[j]
-    if not want:
-        return False
-    for src, val in want.items():
-        comp[src] = val
+    if simple:
+        patched = bytearray(comp)
+        for src, val in want.items():
+            patched[src] = val
+        try:
+            check, _o2, _e2 = decompress(bytes(patched))
+        except Bad:
+            check = None
+        if check == new_plain:
+            _finish(buf, page, patched)
+            return True
+    # 2. the text is produced by back-references (or a changed literal also
+    #    feeds unrelated bytes): write a fresh stream of the same size
     try:
-        check, _o2, _e2 = decompress(bytes(comp))
+        fresh = compress(new_plain, csize)
+        if fresh is None:
+            return False
+        check, _o3, _e3 = decompress(fresh)
     except Bad:
         return False
-    if check != bytes(new_plain):
-        return False              # a changed literal also feeds unrelated text
-    _finish(buf, page, comp)
+    if check != new_plain or len(fresh) != csize:
+        return False
+    _finish(buf, page, bytearray(fresh))
     return True
+
+
+# ---------------------------------------------------------------------------
+# object data (AcDb:AcDbObjects)
+# ---------------------------------------------------------------------------
+# The section starts with the marker 0x0DCA and holds the objects one after
+# another. Every object is: a modular short (its size in bytes), from AC1024
+# on an unsigned modular char (size of its handle stream in bits), `size`
+# bytes of bit-packed data, and a CRC-16 (seed 0xC0C1) over everything from
+# the first size byte up to the CRC. Text inside the data is bit-aligned
+# arbitrarily, so it has to be searched and patched at bit level, and the
+# CRC of every touched object has to be recomputed.
+OBJ_MARK = b"\xca\x0d\x00\x00"
+
+
+def _crc_tables():
+    t8 = []
+    for i in range(256):
+        c = i
+        for _ in range(8):
+            c = (c >> 1) ^ 0xA001 if c & 1 else c >> 1
+        t8.append(c)
+    t16 = [0] * 65536
+    for x in range(65536):
+        lo = t8[x & 0xFF]
+        t16[x] = (lo >> 8) ^ t8[((x >> 8) ^ lo) & 0xFF]
+    return t8, t16
+
+
+_T8, _T16 = _crc_tables()
+
+
+def crc16(data, seed=0xC0C1):
+    """CRC-16 of the DWG format (reflected polynomial 0xA001)."""
+    c = seed
+    n = len(data)
+    even = n & ~1
+    if even:
+        t16 = _T16
+        for w in struct.unpack("<%dH" % (even >> 1), bytes(data[:even])):
+            c = t16[c ^ w]
+    if n & 1:
+        c = (c >> 8) ^ _T8[(c ^ data[n - 1]) & 0xFF]
+    return c
+
+
+def _ms(d, i):
+    val = 0
+    shift = 0
+    n = len(d)
+    while True:
+        if i + 2 > n or shift > 45:
+            return None, i
+        w = d[i] | (d[i + 1] << 8)
+        i += 2
+        val |= (w & 0x7FFF) << shift
+        shift += 15
+        if not w & 0x8000:
+            return val, i
+
+
+def _umc(d, i):
+    val = 0
+    shift = 0
+    n = len(d)
+    while True:
+        if i >= n or shift > 63:
+            return None, i
+        b = d[i]
+        i += 1
+        val |= (b & 0x7F) << shift
+        shift += 7
+        if not b & 0x80:
+            return val, i
+
+
+def section_data(buf, name, pagelist=None, names=None):
+    """Concatenated plain content of one named section and its page layout:
+    (data, [(start offset in data, length, page, mode)]). Returns (None, None)
+    when a page cannot be read or the pages do not tile the section."""
+    names = names if names is not None else section_names(buf)
+    pagelist = pagelist if pagelist is not None else pages(buf)
+    mine = [p for p in pagelist if names.get(p["hdr"][1]) == name]
+    if not mine:
+        return None, None
+    mine.sort(key=lambda p: p["hdr"][4] | (p["hdr"][5] << 32))
+    out = bytearray()
+    layout = []
+    for p in mine:
+        plain, mode = read_page(buf, p)
+        if plain is None:
+            return None, None
+        start = p["hdr"][4] | (p["hdr"][5] << 32)
+        if start != len(out):
+            return None, None
+        layout.append((start, len(plain), p, mode))
+        out += plain
+    return bytes(out), layout
+
+
+def object_spans(d, version):
+    """Objects at the start of the object section whose CRC-16 validates:
+    list of (start, data start, CRC position). The walk stops at the first
+    object that does not validate (padding, free space)."""
+    out = []
+    if bytes(d[:4]) != OBJ_MARK:
+        return out
+    new = bytes(version) >= b"AC1024"
+    n = len(d)
+    i = 4
+    while i + 4 <= n:
+        size, k = _ms(d, i)
+        if not size:
+            break
+        if new:
+            hs, k = _umc(d, k)
+            if hs is None:
+                break
+        crcpos = k + size
+        if crcpos + 2 > n:
+            break
+        if crc16(d[i:crcpos]) != (d[crcpos] | (d[crcpos + 1] << 8)):
+            break
+        out.append((i, k, crcpos))
+        i = crcpos + 2
+    return out
+
+
+def shift_view(data, k):
+    """The byte string seen when reading `data` from bit offset k (MSB first)."""
+    if not k:
+        return bytes(data)
+    n = len(data)
+    v = (int.from_bytes(data, "big") << k) & ((1 << (8 * n)) - 1)
+    return v.to_bytes(n, "big")
+
+
+def put_bits(buf, bitpos, payload):
+    """Overwrite len(payload) bytes of bytearray `buf` starting at bit offset
+    bitpos (MSB first); neighbouring bits are preserved."""
+    j, k = divmod(bitpos, 8)
+    if not k:
+        buf[j:j + len(payload)] = payload
+        return
+    keep_hi = (0xFF << (8 - k)) & 0xFF
+    keep_lo = 0xFF >> k
+    for i, r in enumerate(payload):
+        buf[j + i] = (buf[j + i] & keep_hi) | (r >> k)
+        buf[j + i + 1] = (buf[j + i + 1] & keep_lo) | ((r << (8 - k)) & 0xFF)
+
+
+# ---------------------------------------------------------------------------
+# compressor (for pages whose new content cannot be reached by editing
+# literal bytes of the original stream)
+# ---------------------------------------------------------------------------
+def _emit_long(out, v):
+    k, b = divmod(v - 1, 0xFF)
+    out += b"\x00" * k
+    out.append(b + 1)
+
+
+def _emit_literals(out, run):
+    """Literal run of 4 or more bytes: length opcode, then the bytes."""
+    ln = len(run)
+    if ln <= 18:
+        out.append(ln - 3)
+    else:
+        out.append(0)
+        _emit_long(out, ln - 18)
+    out += run
+
+
+def _emit_match(out, length, off, lit):
+    if 3 <= length <= 14 and off <= 0x3FF:
+        out.append(((length + 1) << 4) | ((off & 3) << 2) | lit)
+        out.append(off >> 2)
+    elif off <= 0x3FFF:
+        if length <= 33:
+            out.append(0x1E + length)
+        else:
+            out.append(0x20)
+            _emit_long(out, length - 0x21)
+        out.append(((off & 0x3F) << 2) | lit)
+        out.append(off >> 6)
+    else:
+        o = off - 0x3FFF
+        if length <= 17:
+            out.append(0x10 | (length - 2))
+        else:
+            out.append(0x10)
+            _emit_long(out, length - 9)
+        out.append(((o & 0x3F) << 2) | lit)
+        out.append(o >> 6)
+
+
+def _best(data, table, i, n, depth):
+    """Longest earlier match for position i: (length, offset) or (0, 0)."""
+    cands = table.get(data[i:i + 3])
+    if not cands:
+        return 0, 0
+    best_len = 0
+    best_off = 0
+    limit = n - i
+    for c in cands[-depth:][::-1]:
+        dist = i - c
+        if dist > 0x7FFF:
+            break
+        ln = 3
+        while ln < limit and data[c + ln] == data[i + ln]:
+            ln += 1
+        # a match must be shorter to write than its bytes: 2 bytes for a
+        # near one of up to 14, 3 bytes otherwise (4 with a far offset)
+        if ln > best_len and (ln >= 5 or (ln == 4 and dist <= 0x4000) or dist <= 0x400):
+            best_len = ln
+            best_off = dist - 1
+            if ln == limit:
+                break
+    return best_len, best_off
+
+
+def _tokens(data, depth=48, lazy=False):
+    """LZ77 parse: list of (literal bytes, match length, match offset); the
+    last token has match length 0. With lazy=True a match is deferred by one
+    byte when the next position offers a longer one."""
+    n = len(data)
+    table = {}
+    toks = []
+    lit_start = 0
+    i = 0
+    while i < n:
+        best_len = 0
+        best_off = 0
+        if 4 <= i <= n - 3:
+            best_len, best_off = _best(data, table, i, n, depth)
+            if lazy and 3 <= best_len < 64 and i + 1 <= n - 3:
+                table.setdefault(data[i:i + 3], []).append(i)
+                nl, _no = _best(data, table, i + 1, n, depth)
+                if nl > best_len + 1:
+                    i += 1                      # keep this byte as a literal
+                    continue
+                table[data[i:i + 3]].pop()
+        if best_len >= 3:
+            toks.append((data[lit_start:i], best_len, best_off))
+            end = i + best_len
+            stop = min(end, n - 2)
+            while i < stop:
+                table.setdefault(data[i:i + 3], []).append(i)
+                i += 1
+            i = end
+            lit_start = i
+        else:
+            if i <= n - 3:
+                table.setdefault(data[i:i + 3], []).append(i)
+            i += 1
+    toks.append((data[lit_start:n], 0, 0))
+    return toks
+
+
+def _serialize(toks):
+    """Tokens -> stream. A literal run of 1-3 bytes rides on the match before
+    it; a longer one gets its own length opcode."""
+    out = bytearray()
+    first = toks[0][0]
+    if len(first) < 4:
+        raise Bad("first literal run too short")
+    _emit_literals(out, first)
+    for idx, (_lit, mlen, moff) in enumerate(toks):
+        if not mlen:
+            break
+        nxt = toks[idx + 1][0]
+        if len(nxt) <= 3:
+            _emit_match(out, mlen, moff, len(nxt))
+            out += nxt
+        else:
+            _emit_match(out, mlen, moff, 0)
+            _emit_literals(out, nxt)
+    out += b"\x11\x00\x00"
+    return out
+
+
+def compress(data, size=None):
+    """Compress one page. With `size`, the stream is made to fit: it is
+    padded with zero bytes after the terminator, and when it would be much
+    shorter than `size` some matches are written as literals instead so that
+    the padding stays small. Returns None when it cannot fit."""
+    data = bytes(data)
+    if len(data) < 8:
+        return None
+    toks = _tokens(data)
+    out = _serialize(toks)
+    if size is None:
+        return bytes(out)
+    if len(out) > size:
+        # tight page: search harder before giving up
+        for depth, lazy in ((256, True), (4096, True)):
+            toks = _tokens(data, depth, lazy)
+            out = _serialize(toks)
+            if len(out) <= size:
+                break
+        else:
+            return None
+    if size - len(out) > 24:
+        # give space back: expand the shortest matches to literals, front to back
+        pos = 0
+        spans = []
+        for lit, mlen, moff in toks:
+            pos += len(lit)
+            spans.append(pos)
+            pos += mlen
+        order = sorted((mlen, i) for i, (_l, mlen, _o) in enumerate(toks) if mlen)
+        drop = set()
+        slack = size - len(out)
+        for mlen, i in order:
+            if slack <= 24:
+                break
+            gain = mlen - 2                      # a match costs 2-4 bytes, its literals mlen
+            if gain <= 0 or gain > slack - 4:
+                continue
+            drop.add(i)
+            slack -= gain + 2                    # allow for a new length opcode
+        if drop:
+            merged = []
+            cur = bytearray()
+            for i, (lit, mlen, moff) in enumerate(toks):
+                cur += lit
+                if mlen and i in drop:
+                    cur += data[spans[i]:spans[i] + mlen]
+                else:
+                    merged.append((bytes(cur), mlen, moff))
+                    cur = bytearray()
+            if merged and len(merged[0][0]) >= 4:
+                out2 = _serialize(merged)
+                if len(out2) <= size:
+                    out = out2
+    return bytes(out) + b"\x00" * (size - len(out))

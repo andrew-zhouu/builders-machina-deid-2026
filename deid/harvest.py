@@ -157,6 +157,18 @@ def h_creo(buf, n, out):
                 seen.add(v)
                 out.append(("creo.user", v.decode("latin-1").strip()))
         i = buf.find(b"user_name\x00", i + 10)
+    # revision comments: "Hostname: '<workstation>'"
+    hosts = set()
+    i = buf.find(b"Hostname: '")
+    while i >= 0 and len(hosts) < 50:
+        a = i + 11
+        b = buf.find(b"'", a, min(n, a + 64))
+        if b > a:
+            v = bytes(buf[a:b])
+            if v not in hosts and all(0x21 <= c < 0x7F for c in v):
+                hosts.add(v)
+                out.append(("creo.hostname", v.decode("latin-1")))
+        i = buf.find(b"Hostname: '", i + 11)
     _anchors(buf, n, out, text=False)
 
 

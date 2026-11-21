@@ -95,11 +95,18 @@ def rename_top(eng, origin, top, owner_only=False):
 def map_path(eng, rel, level="all"):
     """New relative path for corpus path `rel` (engine group must be set).
 
-    level "owner": only the account part of the top-level source directory
-    (and web domains); "top": the whole top-level directory name (account,
-    repository, domain, catalogue name); "all": every component."""
+    level "gitowner": only the account part of sources/github and
+    sources/gitlab folders; "owner": the account part of the top-level source
+    directory (and web domains, archive names); "top": the whole top-level
+    directory name (account, repository, domain, catalogue name); "all":
+    every component."""
     parts = rel.split("/")
     if len(parts) < 2:
+        return rel
+    if level == "gitowner":
+        # controlled experiment: only the account part of code-forge source folders
+        if parts[0] == "sources" and len(parts) >= 4 and parts[1] in ("github", "gitlab"):
+            return "/".join(parts[:2] + [rename_top(eng, parts[1], parts[2], True)] + parts[3:])
         return rel
     if parts[0] == "archives":
         return "/".join([parts[0], rename_top(eng, "archives", parts[1], level == "owner")] + parts[2:])
@@ -130,3 +137,128 @@ def map_member(eng, name):
         else:
             out.append(rename_dir_component(eng, c))
     return "/".join(out)
+
+
+# ---------------------------------------------------------------------------
+# scope: identities named by a file's own location
+# ---------------------------------------------------------------------------
+_HOST_GENERIC = frozenset(
+    "www www2 ftp cdn static media files file docs doc download downloads public wiki blog mail api assets "
+    "content contenthub img images shop store support portal web site sites home data repos repo dspace "
+    "com org net edu gov ac co io uk de fr es it nl ch at jp cn in ca us au eu info dev app cloud online "
+    "github gitlab wordpress blogspot dropbox windows core blob shopify amazonaws s3".split())
+
+
+def _strong(eng, ids, whole):
+    """Drop single short tokens (under four characters) from identities
+    matched inside a longer name, unless the short token is the whole name:
+    alone they are too ambiguous to be replaced everywhere in a folder."""
+    from . import pseudo
+    w = pseudo.canon(whole)
+    out = set()
+    for eid in ids:
+        ent = eng.entries[eid]
+        if len(ent.tokens) == 1 and len(ent.tokens[0]) < 4 and ent.tokens[0] != w:
+            continue
+        out.add(eid)
+    return out
+
+
+def _top_ids(eng, top):
+    """Identities named by one top-level source folder ("sources/<origin>/<name>...")."""
+    ids = set()
+    parts = top.split("/")
+    if len(parts) < 3 or parts[0] != "sources":
+        if parts[0] == "archives" and len(parts) >= 2:
+            stem = split_name(parts[1])[0]
+            segs = [x for x in stem.split("__") if x]
+            if segs:
+                ids |= _strong(eng, eng.match_ids(segs[0], "id"), segs[0])
+            for sg in segs[1:]:
+                if not _HASH.match(sg):
+                    ids |= eng.match_ids(sg, "text")
+        return ids
+    origin, name = parts[1], parts[2]
+    if origin in ("github", "gitlab"):
+        segs = [x for x in name.split("__") if x]
+        if origin == "gitlab" and segs and segs[0] == "gitlab.com":
+            segs = segs[1:]
+        if segs:
+            ids |= _strong(eng, eng.match_ids(segs[0], "id"), segs[0])   # the account, whatever its tier
+        for sg in segs[1:]:
+            if not _HASH.match(sg):
+                ids |= eng.match_ids(sg, "text")
+    elif origin == "web":
+        ids |= eng.match_ids(name, "text")
+        for label in name.lower().split("."):
+            if label not in _HOST_GENERIC and len(label) >= 2:
+                ids |= _strong(eng, eng.match_ids(label, "id"), label)   # the organisation / account label of the host
+    elif origin == "existing":
+        for c in parts[2:5]:                              # collection folders
+            ids |= eng.match_ids(c, "text")
+    else:
+        ids |= eng.match_ids(name, "text")
+    return ids
+
+
+def _group_ids(eng, group):
+    """Identities named by a source group's own folder and by the folders
+    linked to it (cached per engine)."""
+    cache = eng.__dict__.setdefault("_gscope", {})
+    ids = cache.get(group)
+    if ids is None:
+        ids = set(_top_ids(eng, group + "/x"))
+        for other in eng.links.get(group, ()):
+            ids |= _top_ids(eng, other + "/x")
+        cache[group] = ids
+    return ids
+
+
+def group_scope(eng, rel, copies=()):
+    """Group-level scope of a file: the identities named by its top-level
+    source folder, by the folders linked to it (folders that hold copies of
+    the same files) and by the folders of the exact copies of this file.
+    The same for every file of a group, so file names and the references to
+    them change together; and the same for every copy of one document."""
+    from . import util
+    ids = _group_ids(eng, util.group_of(rel.split("!/", 1)[0]))
+    if copies:
+        ids = set(ids)
+        for c in copies:
+            ids |= _group_ids(eng, util.group_of(c))
+    return ids
+
+
+def scope_ids(eng, rel):
+    """Document-level additions to the scope: identities found in the path
+    components below the top-level folder and in archive member paths (under
+    the usual free-text rules). Used for documents that are read by people
+    (PDF), not for files whose strings are machine references."""
+    ids = set()
+    pieces = rel.split("!/")
+    parts = pieces[0].split("/")
+    rest = parts[3:] if (len(parts) >= 3 and parts[0] == "sources") else parts[1:]
+    for c in rest:
+        ids |= eng.match_ids(c, "text")
+    for member in pieces[1:]:
+        for c in member.split("/"):
+            ids |= eng.match_ids(c, "text")
+    return ids
+
+
+def map_all(eng, rels, level, scope=False):
+    """Yield (rel, new path) for every corpus path, in sorted order. With
+    scope, each path is mapped under the group-level scope of its folder,
+    exactly the scope its contents are processed with."""
+    from . import util
+    last = None
+    for rel in sorted(rels):
+        g = util.group_of(rel)
+        if g != last:
+            eng.group = g
+            eng.extra_groups = frozenset()
+            eng.scope_begin()
+            if scope:
+                eng.scope_promote(group_scope(eng, rel))
+            last = g
+        yield rel, map_path(eng, rel, level)

@@ -78,6 +78,8 @@ class Lists:
         toks = [t for t in tokens if not t.isdigit() and len(t) > 1]
         if not toks:
             return True
+        if any(t in _TEMPLATE_TOK for t in toks):
+            return True     # unfilled template fields ("creator_lastname")
         j = "".join(toks)
         if j in self.generic or j in self.software:
             return True
@@ -94,6 +96,10 @@ class Lists:
         return t in self.words or t in self.eng or t in self.struct
 
 
+_PLATFORMS = ("github.io", "gitlab.io", "files.wordpress.com", "wordpress.com", "blogspot.com",
+              "blob.core.windows.net", "web.app", "netlify.app", "herokuapp.com", "readthedocs.io",
+              "sourceforge.net", "weebly.com", "wixsite.com", "neocities.org")
+_TEMPLATE_TOK = frozenset(("firstname", "lastname", "givenname", "familyname", "middlename"))
 _VERSIONISH = re.compile(r"^(v?\d+(\.\d+)*|sp\d+|x64|x86|r\d+|20\d\d)$")
 _RE_DOMUSER = re.compile(r"^\s*([^\\/@\s()]{1,40})\\+([^\\/()]{1,60}?)\s*(?:\(([^)]{1,60})\)?)?\s*$")
 _RE_EMAIL = re.compile(r"[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
@@ -209,6 +215,10 @@ def name_class(name):
 
 
 def label_class(label):
+    if label in ("creo.host", "creo.hostname"):
+        return "HOST"
+    if label == "creo.dbid":
+        return "ORG"
     if label in _PERSON_LABELS:
         return "PERSON"
     if label in _ORG_LABELS:
@@ -284,13 +294,14 @@ class Builder:
                 return False
         return len(scripts - {"latin"}) <= 1
 
-    def add(self, tokens, cls, surface, label, count, groups, keep=None, exact=False):
+    def add(self, tokens, cls, surface, label, count, groups, keep=None, exact=False, force=False):
         tokens = tuple(tokens)
-        if not tokens or self.L.is_generic(tokens):
+        if not tokens or (self.L.is_generic(tokens) and not force):
             return
         if not all(self._plausible(t) for t in tokens):
             return
-        if all(len(set(t)) <= 2 for t in tokens if not t.isdigit()) and not any(t.isdigit() for t in tokens):
+        if (not force and all(len(set(t)) <= 2 for t in tokens if not t.isdigit())
+                and not any(t.isdigit() for t in tokens)):
             return      # "iiiiiiii", "xxxx": filler, not a name
         c = self.cand.get(tokens)
         if c is None:
@@ -352,6 +363,46 @@ class Builder:
                         self.L.common(t) or len(t) < 4 or t in self.L.proper or ordinary_word(t, self.L)):
                     continue        # organisation names: only their distinctive words stand alone
                 self.add((t,), cls, None, label, count, groups)
+
+    def add_site(self, host, label, count, groups):
+        """The host name of a source folder ("sources/web/<host>"). Beyond
+        add_domain: on a hosting platform the account label is the identity
+        ("<account>.github.io"), and the site of a catalogue vendor is an
+        identity inside its own folder (and only there)."""
+        low = host.lower().strip(".")
+        for suffix in _PLATFORMS:
+            if low.endswith("." + suffix):
+                account = low[:-len(suffix) - 1].split(".")[-1]
+                if account and account not in ("www", "files", "docs", "static", "cdn"):
+                    before = set(self.cand)
+                    self.add_account(account, label, count, groups)
+                    toks = tuple(pseudo.tokens_of(account))
+                    if toks not in self.cand and len(toks) == 1 and len(toks[0]) >= 4:
+                        self.add(toks, "ACCOUNT", account, label, count, groups, force=True)
+                    for t in set(self.cand) - before:
+                        if len(t) == 1 and (self.L.common(t[0]) or len(t[0]) < 4):
+                            del self.cand[t]        # a common word out of a compound account name
+                        else:
+                            self.cand[t]["force"] = "L"
+                return
+        reg, _n = registrable(low)
+        main = reg.split(".")[0] if reg else ""
+        if reg and reg not in self.L.safe_domains and self.L.is_vendor(pseudo.tokens_of(main)):
+            before = set(self.cand)
+            tokens = pseudo.tokens_of(reg)
+            ntail = len(tokens) - len(pseudo.tokens_of(main))
+            keep = [0] * (len(tokens) - ntail) + [1] * ntail
+            self.add(tokens, "DOMAIN", reg, label, count, groups, keep=keep, exact=True, force=True)
+            self.add(tuple(pseudo.tokens_of(main)), "DOMAIN", main, label, count, groups, force=True)
+            for t in (tuple(tokens), tuple(pseudo.tokens_of(main))):
+                if t in self.cand:
+                    self.cand[t]["max"] = "L"
+                    if t in set(self.cand) - before:
+                        self.cand[t]["force"] = "L"
+                    else:
+                        self.cand[t]["force_min"] = "L"
+            return
+        self.add_domain(host, label, count, groups)
 
     def add_domain(self, host, label, count, groups):
         reg, nsuffix = registrable(host)
@@ -433,6 +484,8 @@ class Builder:
     # ------------------------------------------------------------------
     def tier(self, tokens, c):
         t0 = self._tier(tokens, c)
+        if c.get("max") == "L" and t0 == "A":
+            t0 = "L"            # never corpus-wide: only in the source folders it belongs to
         if c.get("cap") and t0 == "A" and all(l == "path.repo" for l in c["labels"]):
             t0 = c["cap"]
         # identities known only from visible text stay scoped to their own group
@@ -462,6 +515,8 @@ class Builder:
                 return "B"
             if t in L.proper:
                 return "L"
+            if t in LARGE_WORDS:
+                return "L"      # an English word that is also a name: only where it was seen as one
             mixed = any(ch.isdigit() for ch in t)
             ngroups = len(c["g"])
             # corpus-wide replacement needs a long token, or one seen as an
@@ -481,6 +536,7 @@ class Builder:
 
     def finish(self, key):
         entries = []
+        links = getattr(self, "links", None) or {}
         for tokens, c in self.cand.items():
             tier = self.tier(tokens, c)
             if tier is None:
@@ -495,9 +551,19 @@ class Builder:
                 exact = True
             if c.get("alias_of"):
                 self.surname_alias[tokens[0]] = c["alias_of"]
+            w = 0
+            if len(tokens) == 1:
+                t0 = tokens[0]
+                if self.L.common(t0) or t0 in self.L.generic_tok or t0 in self.L.calendar:
+                    w = 2           # common vocabulary: never promoted by document scope
+                elif t0 in LARGE_WORDS or t0 in FOREIGN_WORDS:
+                    w = 1           # a word of some language: promoted only as a proper noun
+            home = set(c["g"])
+            for g in c["g"]:
+                home.update(links.get(g, ()))
             entries.append({"t": list(tokens), "k": keep, "o": [s for s, _n in c["o"].most_common(12)],
                             "tier": tier, "cls": c["cls"].most_common(1)[0][0], "x": 1 if exact else 0,
-                            "n": c["n"], "g": sorted(c["g"]),
+                            "n": c["n"], "g": sorted(home), "w": w,
                             "labels": [l for l, _n in c["labels"].most_common(4)]})
         entries.sort(key=lambda e: (e["t"]))
         toks = set()
@@ -585,6 +651,170 @@ def path_candidates(files_jsonl):
     return seen
 
 
+_NOT_INITIALS = frozenset(
+    "gfk pla abs petg pom pvc ptfe peek pmma hdpe ldpe epdm nbr fkm cnc cad cam din iso ansi asme astm bom qty "
+    "ref typ max min nts dwg rev eco ecn rohs sst sus stl stp step pcb led usb gnd vcc vdd npt unc unf bsp hex csk "
+    "thk dia rad brs brz sps tbd tba n/a nan qa qc mfg eng std opt alu inox".split())
+
+
+def add_curated_text(B, cls, surface, groups):
+    """One reviewed identity read from drawing text, valid in `groups` only.
+    Returns 1 when something was added."""
+    label = "pdftext.curated"
+    L = B.L
+    before = set(B.cand)
+    touched = set()
+
+    def raw(tokens, kind, exact=True):
+        tokens = tuple(tokens)
+        c = B.cand.setdefault(tokens, {"cls": collections.Counter(), "o": collections.Counter(),
+                                       "labels": collections.Counter(), "n": 0, "g": set(),
+                                       "keep": None, "exact": exact})
+        c["cls"][kind] += 1
+        c["o"][surface] += 1
+        c["labels"][label] += 1
+        c["n"] += 1
+        c["g"].update(groups)
+        touched.add(tokens)
+
+    toks = pseudo.tokens_of(surface)
+    if not toks or len(surface) < 3:
+        return 0
+    if cls == "PERSON":
+        B.add_person_value(surface, label, 1, groups)
+        for t in toks:                    # name parts stand alone inside this group
+            if len(t) >= 3 and not t.isdigit() and not L.common(t) and (t,) in B.cand:
+                touched.add((t,))
+        if tuple(toks) in B.cand:
+            touched.add(tuple(toks))
+    elif cls == "ORG":
+        if L.is_vendor(toks):
+            return 0                      # catalogue vendors keep their names (they are engineering data)
+        B.add_phrase(surface, "ORG", label, 1, groups, singles=True)
+        if tuple(toks) not in B.cand and len(toks) <= 8 and any(not L.common(t) and len(t) >= 3 for t in toks):
+            raw(toks, "ORG", exact=False)
+        if tuple(toks) in B.cand:
+            touched.add(tuple(toks))
+    elif cls == "EMAIL":
+        B.add_person_value(surface.replace(" @", "@").replace("@ ", "@"), label, 1, groups)
+    elif cls == "URL":
+        # the site of a person or organisation: its registrable domain, and the
+        # name in it when that is distinctive; never mail providers, code
+        # forges, publishers or catalogue vendors
+        host = re.sub(r"^[a-z]+://", "", surface.strip().lower()).split("/")[0].replace(" ", "")
+        reg, _n = registrable(host)
+        if not reg or reg in L.safe_domains or host in L.safe_domains:
+            return 0
+        main = reg.split(".")[0]
+        mt = pseudo.tokens_of(main)
+        if not mt or L.is_vendor(mt) or L.is_generic(mt) or "".join(mt) in L.software:
+            return 0
+        tokens = pseudo.tokens_of(reg)
+        ntail = len(tokens) - len(mt)
+        B.add(tokens, "DOMAIN", reg, label, 1, groups, keep=[0] * len(mt) + [1] * ntail, exact=True)
+        if tuple(tokens) in B.cand:
+            touched.add(tuple(tokens))
+        if len(mt) == 1 and len(mt[0]) >= 6 and not ordinary_word(mt[0], L):
+            B.add(tuple(mt), "DOMAIN", main, label, 1, groups)
+            if tuple(mt) in B.cand:
+                touched.add(tuple(mt))
+    elif cls in ("ADDRESS", "PHONE"):
+        if sum(len(t) for t in toks) < 6 or len(toks) > 10:
+            return 0
+        raw(toks, "ORG", exact=True)
+    elif cls == "INITIALS":
+        if len(toks) != 1 or not (3 <= len(toks[0]) <= 5) or not toks[0].isalpha() or L.common(toks[0]):
+            return 0
+        if toks[0] in _NOT_INITIALS or toks[0] in L.eng or toks[0] in L.generic_tok:
+            return 0
+        raw(toks, "PERSON", exact=False)
+    elif cls == "NAME":
+        # a reviewed name that is also an ordinary word ("marco"): taken as it is
+        if len(toks) > 4 or sum(len(t) for t in toks) < 4:
+            return 0
+        raw(toks, "PERSON", exact=len(toks) > 1)
+    else:
+        return 0
+    if cls not in ("NAME", "INITIALS"):
+        # a name part that is ordinary English vocabulary ("Branch", "Singer",
+        # "Angles") never stands alone: only the full name is replaced
+        for t in list(set(B.cand) - before):
+            if len(t) == 1 and (L.common(t[0]) or t[0] in L.generic_tok or t[0] in L.calendar):
+                del B.cand[t]
+                touched.discard(t)
+        touched = set(t for t in touched if not (len(t) == 1 and L.common(t[0])))
+    new = (set(B.cand) - before) | touched
+    for t in new:
+        c = B.cand.get(t)
+        if c is None:
+            continue
+        c["max"] = "L" if all(l.startswith("pdftext.") or l == "path.repo" for l in c["labels"]) else c.get("max")
+        if t in before:
+            c["force_min"] = "L"
+        else:
+            c["force"] = "L"
+    return 1 if new else 0
+
+
+def duplicate_links(manifest, min_shared=3, max_links=12):
+    """Source groups that hold copies of the same files, and the exact copies
+    of every PDF. Read from the corpus manifest (path <TAB> bytes <TAB> md5).
+
+    Returns (links, copies): links[group] = groups sharing at least
+    `min_shared` identical files with it (strongest first); copies[path] =
+    paths of the other files with the same content (PDF files only)."""
+    links, copies = {}, {}
+    if not manifest or not os.path.exists(manifest):
+        return links, copies
+    sets = collections.defaultdict(list)
+    with open(manifest, encoding="utf-8") as fh:
+        for line in fh:
+            if line.startswith("#"):
+                continue
+            c = line.rstrip("\n").split("\t")
+            if len(c) >= 3 and c[2] and c[1] not in ("", "0"):
+                sets[c[2]].append(c[0])
+    pair = collections.Counter()
+    for paths in sets.values():
+        if len(paths) < 2:
+            continue
+        groups = sorted(set(util.group_of(p) for p in paths))
+        if 2 <= len(groups) <= 12:
+            for a in groups:
+                for b in groups:
+                    if a != b:
+                        pair[(a, b)] += 1
+        if paths[0].lower().endswith(".pdf"):
+            for p in paths:
+                copies[p] = [q for q in paths if q != p][:8]
+    by = collections.defaultdict(list)
+    for (a, b), n in pair.items():
+        if n >= min_shared:
+            by[a].append((n, b))
+    for a, lst in by.items():
+        links[a] = [b for _n, b in sorted(lst, reverse=True)[:max_links]]
+    return links, copies
+
+
+def export_lists(L):
+    """Word knowledge the engine needs at run time for identity fields whose
+    value has no dictionary entry: placeholder values, words to keep, common
+    vocabulary and words that are usually names."""
+    return {"generic": sorted(L.generic | L.software),
+            "struct": sorted(L.struct),
+            "keeptok": sorted(L.generic_tok | L.struct),
+            "common": sorted(L.words | L.eng | L.struct),
+            "proper": sorted(L.proper)}
+
+
+def word_flag(L, t0):
+    if L.common(t0) or t0 in L.generic_tok or t0 in L.calendar:
+        return 2
+    if t0 in LARGE_WORDS or t0 in FOREIGN_WORDS:
+        return 1
+    return 0
+
+
 def main(argv):
     import argparse
     ap = argparse.ArgumentParser()
@@ -594,6 +824,8 @@ def main(argv):
     ap.add_argument("--demote", default=None, help="census output (JSON list of [tokens, tier])")
     ap.add_argument("--no-curated", action="store_true", help="ignore data/curated_identities.tsv")
     ap.add_argument("--no-text", action="store_true", help="ignore harvest/values_text.jsonl")
+    ap.add_argument("--manifest", default=os.path.join(os.path.dirname(util.INPUT.rstrip("/")), "manifest.tsv"),
+                    help="corpus manifest (path, bytes, md5): used to treat exact copies of a file alike")
     args = ap.parse_args(argv)
     demote = {}
     dpath = args.demote or os.path.join(args.out, "demote.json")
@@ -644,6 +876,9 @@ def main(argv):
                 B.add_account(v, label, cnt, groups)
             elif cls == "DOMAIN":
                 B.add_domain(v, label, cnt, groups)
+            elif cls == "HOST":
+                if not v.startswith("#"):
+                    B.add_phrase(v, "HOST", label, cnt, groups, singles=False)
     # identities derived from visible drawing text (textharvest.py), if present
     tpath = os.path.join(args.harvest, "values_text.jsonl")
     if os.path.exists(tpath) and not args.no_text:
@@ -681,13 +916,30 @@ def main(argv):
             parts = top.split("__")
             if src == "gitlab" and parts and parts[0] == "gitlab.com":
                 parts = parts[1:]
+            owner_c = ""
             if parts:
                 B.add_account(parts[0], "path.owner", 1, [grp])
+                otoks = tuple(pseudo.tokens_of(parts[0]))
+                owner_c = "".join(otoks)
+                if (len(otoks) == 1 and len(owner_c) >= 4
+                        and (otoks not in B.cand or B.cand[otoks].get("owner_forced"))
+                        and owner_c not in B.L.software and owner_c not in B.L.eng
+                        and owner_c not in B.L.vendor_tok and owner_c not in B.L.words
+                        and owner_c not in LARGE_WORDS):
+                    # the account that owns a source folder is an identity even when
+                    # its name looks like a placeholder ("team1234", "user42")
+                    B.add(otoks, "ACCOUNT", parts[0], "path.owner", 1, [grp], force=True)
+                    if otoks in B.cand:
+                        B.cand[otoks]["force"] = "L"
+                        B.cand[otoks]["owner_forced"] = True
             # distinctive words of the repository name are project names of this group
             rp = [p for p in parts[1:] if p]
             if rp and not args.no_curated:
                 repo = rp[0]
                 for tok in pseudo.tokens_of(repo):
+                    if len(owner_c) >= 4 and owner_c in tok and tok != owner_c:
+                        continue    # "<owner>Sigma": the owner's name plus a product word; the
+                                    # owner part is replaced wherever it stands (same pseudonym)
                     if (len(tok) >= 5 and not tok.isdigit() and not B.L.common(tok) and tok not in B.L.proper
                             and tok not in B.L.generic_tok and not B.L.is_vendor([tok])
                             and not any(v in tok for v in B.L.vendor_tok if len(v) >= 5)
@@ -699,13 +951,13 @@ def main(argv):
                             B.cand[(tok,)]["force"] = "L"
                             B.cand[(tok,)]["cap"] = "L"
         elif src == "web":
-            B.add_domain(top, "path.domain", 1, [grp])
+            B.add_site(top, "path.domain", 1, [grp])
     # curated identities (folder names / visible text), scoped by path prefix
     cur = os.path.join(util.DATA_DIR, "curated_identities.tsv")
+    all_groups = sorted(set(path_candidates(os.path.join(args.harvest, "files.jsonl")).values()))
+    with open(os.path.join(args.harvest, "files.jsonl"), encoding="utf-8") as fh:
+        all_groups = sorted(set(all_groups) | set(util.group_of(json.loads(l)["p"].split("!/", 1)[0]) for l in fh))
     if os.path.exists(cur) and not args.no_curated:
-        all_groups = sorted(set(path_candidates(os.path.join(args.harvest, "files.jsonl")).values()))
-        with open(os.path.join(args.harvest, "files.jsonl"), encoding="utf-8") as fh:
-            all_groups = sorted(set(all_groups) | set(util.group_of(json.loads(l)["p"].split("!/", 1)[0]) for l in fh))
         with open(cur, encoding="utf-8") as fh:
             for line in fh:
                 line = line.rstrip("\n")
@@ -727,9 +979,35 @@ def main(argv):
                 toks = tuple(pseudo.tokens_of(surface))
                 if toks in B.cand and len(toks) == 1 and "force" not in B.cand[toks]:
                     B.cand[toks]["force_min"] = "L"
+    ctext = os.path.join(util.DATA_DIR, "curated_text.tsv")
+    if os.path.exists(ctext) and not args.no_curated:
+        n_ct = 0
+        with open(ctext, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.rstrip("\n")
+                if not line or line.startswith("#") or line.count("\t") < 2:
+                    continue
+                scope, cls, surface = line.split("\t", 2)
+                groups = [g for g in all_groups if g == scope or g.startswith(scope + "/")]
+                if not groups:
+                    continue
+                n_ct += add_curated_text(B, cls, surface.strip(), groups)
+        print("curated text identities used: %d" % n_ct)
+    links, copies = duplicate_links(args.manifest)
+    B.links = links
+    with open(os.path.join(args.out, "dups.json"), "w", encoding="utf-8") as fh:
+        json.dump({"links": links, "copies": copies}, fh, ensure_ascii=False)
+    print("groups linked by shared files: %d; PDF files with exact copies: %d" % (len(links), len(copies)))
     entries, table = B.finish(key)
+    tokflag = {}
+    for t in table:
+        if B.L.common(t) or t in B.L.generic_tok or t in B.L.calendar:
+            tokflag[t] = 2
+        elif t in LARGE_WORDS or t in FOREIGN_WORDS:
+            tokflag[t] = 1
     with open(os.path.join(args.out, "dict.json"), "w", encoding="utf-8") as fh:
-        json.dump({"entries": entries, "table": table}, fh, ensure_ascii=False)
+        json.dump({"entries": entries, "table": table, "tokflag": tokflag, "lists": export_lists(B.L),
+                   "links": links}, fh, ensure_ascii=False)
     with open(os.path.join(args.out, "review.tsv"), "w", encoding="utf-8") as fh:
         fh.write("tier\tcls\tn\tgroups\ttokens\tpseudonym\tsurfaces\tlabels\n")
         for e in sorted(entries, key=lambda e: (e["tier"], e["cls"], -e["n"])):

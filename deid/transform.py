@@ -31,7 +31,7 @@ MAX_DEPTH = 4
 _ENGINE = None
 _TMPROOT = None
 OPTS = {"rename": False, "pdftext": False, "creo": False, "zlb": False, "strings": False, "dwg": False,
-        "pdfextra": False}
+        "pdfextra": False, "dwgobj": False, "scope": False, "nofallback": False}
 TEXT_KINDS = ("step", "iges", "dxf", "svg", "text")
 
 
@@ -48,6 +48,48 @@ def _init(dict_path, key_path, tmproot, opts=None):
     _ENGINE = E.Engine(dict_path, key, protect if use_protect else None)
     _TMPROOT = tmproot
     H.OPTS.update(OPTS)
+    H.NESTED = _nested
+    dups = os.path.join(os.path.dirname(dict_path), "dups.json")
+    _COPIES.clear()
+    if OPTS.get("scope") and os.path.exists(dups):
+        with open(dups, encoding="utf-8") as fh:
+            _COPIES.update(json.load(fh).get("copies") or {})
+
+
+_COPIES = {}          # corpus path -> paths of its exact copies (PDF files; from dups.json)
+
+
+def prepare(eng, rel):
+    """Per-file engine state: source group, and the groups of exact copies
+    of a PDF (so that every copy of one document gets the same pseudonyms)."""
+    eng.group = util.group_of(rel)
+    eng.stats = {}
+    copies = _COPIES.get(rel)
+    eng.extra_groups = frozenset(util.group_of(c) for c in copies) if copies else frozenset()
+
+
+def _nested(name, data, depth=1):
+    """Process a file embedded in another file (a PDF attachment) with the
+    handler of its own format. Returns the new bytes, or None when nothing
+    changed or the embedded file could not be handled."""
+    base = os.path.basename(name.replace("\\", "/")) or "embedded"
+    d = tempfile.mkdtemp(prefix="emb", dir=_TMPROOT)
+    try:
+        src = os.path.join(d, "in")
+        dst = os.path.join(d, "out")
+        with open(src, "wb") as fh:
+            fh.write(data)
+        state = _ENGINE.scope_save()          # the enclosing document's scope must survive
+        try:
+            ch, _kind, _info = process(_ENGINE.group + "/embedded!/" + base, src, dst, depth)
+        finally:
+            _ENGINE.scope_restore(state)
+        if not ch:
+            return None
+        with open(dst, "rb") as fh:
+            return fh.read()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def process(logical, src, dst, depth=0):
@@ -64,6 +106,24 @@ def process(logical, src, dst, depth=0):
     kind = util.kind_of(name, head)
     if size == 0:
         return False, kind, {}
+    # Scope: the identities named by the file's source folder (and by the
+    # folders that hold copies of it) are removed from its contents too,
+    # whatever their tier. The same group-level scope is used when paths are
+    # renamed, so names and references stay in step. A PDF is read by people
+    # and carries no machine references, so the rest of its path counts too.
+    eng.scope_begin()
+    if OPTS.get("scope"):
+        try:
+            from deid import paths as _P
+            copies = _COPIES.get(logical, ()) if kind == "pdf" else ()
+            ids = _P.group_scope(eng, logical, copies)
+            if kind == "pdf":
+                ids = set(ids) | _P.scope_ids(eng, logical)
+                for c in copies:                  # every copy of a document is treated alike
+                    ids |= _P.scope_ids(eng, c)
+            eng.scope_promote(ids)
+        except Exception:
+            pass
     tmp = dst + ".tmp~"
     try:
         if kind in TEXT_KINDS:
@@ -242,6 +302,9 @@ def do_archive(logical, src, dst, kind, name, depth):
                 repl[key] = out
         names = {}
         if rename:
+            eng.scope_begin()
+            if OPTS.get("scope"):
+                eng.scope_promote(P.group_scope(eng, logical))
             if kind == "zip":
                 with zipfile.ZipFile(src) as zf:
                     for idx, zi in enumerate(zf.infolist()):
@@ -323,8 +386,7 @@ def do_archive(logical, src, dst, kind, name, depth):
 def _work(item):
     rel, size, out_root, out_rel = item
     eng = _ENGINE
-    eng.group = util.group_of(rel)
-    eng.stats = {}
+    prepare(eng, rel)
     src = os.path.join(util.INPUT, rel)
     dst = os.path.join(out_root, out_rel)
     t0 = time.time()
@@ -347,7 +409,16 @@ def _work(item):
         rec["o"] = out_rel
     rec.update(info)
     if eng.stats:
-        rec["st"] = eng.stats
+        # per-entry counts for dictionary entries; name parts promoted by
+        # document scope have no stable id and are only counted
+        st = {k: v for k, v in eng.stats.items() if 0 <= k < eng.ndict}
+        if st:
+            rec["st"] = st
+        extra = sum(v for k, v in eng.stats.items() if k >= eng.ndict)
+        if extra:
+            rec["sv"] = extra
+        if eng.stats.get(-1):
+            rec["sf"] = eng.stats[-1]      # account / author fields replaced without a dictionary entry
     return rec
 
 
@@ -368,7 +439,15 @@ def main(argv):
     ap.add_argument("--pdftext", action="store_true", help="replace identities in visible PDF text")
     ap.add_argument("--creo", action="store_true", help="edit string values in Creo files and Parasolid binary headers")
     ap.add_argument("--zlb", action="store_true", help="edit zlib-compressed sub-streams of pre-2015 SolidWorks files")
-    ap.add_argument("--dwg", action="store_true", help="edit text inside DWG (R2004+) data pages")
+    ap.add_argument("--dwg", action="store_true", help="edit the metadata sections of DWG (R2004+) files")
+    ap.add_argument("--no-field-fallback", action="store_true",
+                    help="do not pseudonymise identity-field values that have no dictionary entry "
+                         "(used by second-pass checks: the fallback is not idempotent by design)")
+    ap.add_argument("--scope", action="store_true",
+                    help="document scope: an identity found in a file's identity fields, text or path is "
+                         "replaced everywhere in that file")
+    ap.add_argument("--dwgobj", action="store_true",
+                    help="also edit text inside DWG object data (bit level, per-object CRC kept valid)")
     ap.add_argument("--logos", default=None,
                     help="pdflogos.json from pdfharvest.py: replace repeated small images in PDFs (needs --pdftext)")
     ap.add_argument("--previews", action="store_true",
@@ -379,7 +458,7 @@ def main(argv):
                     help="edit text runs (paths, user names) in otherwise unparsed streams of native files")
     args = ap.parse_args(argv)
     opts = {"rename": args.rename, "pdftext": args.pdftext, "creo": args.creo, "zlb": args.zlb,
-            "strings": args.strings, "dwg": args.dwg, "pdfextra": args.pdfextra,
+            "strings": args.strings, "dwg": args.dwg, "dwgobj": args.dwgobj, "scope": args.scope, "nofallback": args.no_field_fallback, "pdfextra": args.pdfextra,
             "previews": args.previews, "logos": args.logos}
     os.makedirs(args.out, exist_ok=True)
     tmproot = os.path.join(util.WORK, "tmp")
@@ -403,9 +482,7 @@ def main(argv):
         from deid import paths as P
         _init(args.dict, args.key, tmproot, opts)
         taken = {}
-        for rel, _s in sorted(util.walk_input()):
-            _ENGINE.group = util.group_of(rel)
-            new = P.map_path(_ENGINE, rel, args.rename)
+        for rel, new in P.map_all(_ENGINE, [r for r, _s in util.walk_input()], args.rename, bool(args.scope)):
             if new in taken or len(new.encode("utf-8")) > 1000:
                 new = rel                      # never merge two files into one name
             if new in taken:

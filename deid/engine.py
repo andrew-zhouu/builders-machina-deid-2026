@@ -58,8 +58,17 @@ def norm_text(s):
     return s.translate(_TEXT_TABLE)
 
 
+_JOIN = frozenset("/\\._-@:~0123456789")
+# values that mean "no value", and profile folders that belong to no one
+_ABSENT = frozenset((
+    "unknown", "none", "null", "n a", "na", "nan", "anonymous", "unspecified", "not specified", "tbd", "tba",
+    "undefined", "empty", "author", "name", "your name", "user name", "username", "company", "company name",
+    "organization", "organisation", "public", "default", "default user", "all users", "defaultuser0", "shared",
+    "desconocido", "unbekannt", "inconnu", "sin nombre"))
+
+
 class Entry:
-    __slots__ = ("eid", "tokens", "keep", "tier", "cls", "pseudo", "mask", "nchar", "groups")
+    __slots__ = ("eid", "tokens", "keep", "tier", "cls", "pseudo", "mask", "nchar", "groups", "word")
 
 
 class Engine:
@@ -70,8 +79,27 @@ class Engine:
             with open(dictionary, encoding="utf-8") as fh:
                 dictionary = json.load(fh)
         self.pz = pseudo.Pseudonymizer(key, dictionary.get("table"))
+        self.tokflag = dictionary.get("tokflag") or {}
+        lists = dictionary.get("lists") or {}
+        self.generic = frozenset(lists.get("generic") or ())
+        self.keeptok = frozenset(lists.get("keeptok") or ())
+        self.common = frozenset(lists.get("common") or ())
+        self.proper = frozenset(lists.get("proper") or ())
+        self.struct = frozenset(lists.get("struct") or ("pc", "laptop", "desktop", "notebook", "inc", "ltd", "gmbh",
+                                                        "llc", "corp", "co", "university", "lab", "labs"))
         self.group = None      # source group of the file being processed
         self.stats = {}        # eid -> replacements (reset per file by callers)
+        # Document scope: identities known to belong to the file being
+        # processed (found in its identity fields, its text or its path).
+        # They are replaced everywhere in that file, whatever their tier.
+        self.no_protect = False    # True while a file without machine references is processed
+        self.extra_groups = frozenset()   # source groups that hold exact copies of the current file
+        self.links = dictionary.get("links") or {}   # group -> groups that share files with it
+        self.scoped = set()        # eids replaceable in free text of this file
+        self.scoped_sub = set()    # eids matched even inside a longer word
+        self.single = {}           # token -> eid of its single-token entry
+        self._scope_auto = None
+        self.keys_of = {}
         self.entries = []
         self.A = ahocorasick.Automaton()
         keys = {}
@@ -82,6 +110,7 @@ class Engine:
             e.keep = d.get("k") or [0] * len(e.tokens)
             e.tier = d.get("tier", "A")
             e.cls = d.get("cls", "")
+            e.word = d.get("w", 0)      # 1: a dictionary word in some language, 2: common vocabulary
             ps = []
             mask = []
             for tok, keep in zip(e.tokens, e.keep):
@@ -139,6 +168,7 @@ class Engine:
                 e.keep = [1] * len(toks)
                 e.tier = "P"
                 e.cls = "FILE"
+                e.word = 0
                 e.pseudo = "".join(toks)
                 e.mask = "1" * len(e.pseudo)
                 e.nchar = len(e.pseudo)
@@ -165,6 +195,12 @@ class Engine:
                 if v[1] != "u16":
                     self.F8.add_word(k, v)
                     nfree8 += 1
+        self.ndict = len(self.entries)     # entries above this index are run-time name parts
+        for k, v in keys.items():
+            self.keys_of.setdefault(v[0], []).append((k, v))
+        for e in self.entries:
+            if len(e.tokens) == 1 and e.tier != "P":
+                self.single.setdefault(e.tokens[0], e.eid)
         self.nkeys = len(keys)
         self.nfree = nfree
         if keys:
@@ -199,18 +235,31 @@ class Engine:
             return True
         return False
 
-    def _hits(self, view, orig, bytes_view, free_only=False, wide=True):
+    @staticmethod
+    def _digit_edge(ent, view, outside, inside):
+        """A name of four or more characters that ends (or starts) with a
+        letter and is followed (or preceded) by a digit: "ICUB2", "A3ACME".
+        The digit is a version or code written against the name, so the name
+        still counts as a word of its own."""
+        return (ent.nchar >= 4 and "0" <= view[outside] <= "9" and view[inside].isalpha()
+                and view[inside] < "\x80")
+
+    def _hits(self, view, orig, bytes_view, free_only=False, wide=True, auto=None):
         """All boundary-valid dictionary matches: (start, end, eid, enc)."""
         out = []
-        if not self.nkeys or (free_only and not self.nfree):
+        binary = bytes_view and getattr(self, "_binary", False)
+        if not self.nkeys or (free_only and not self.nfree and auto is None):
             return out
         n = len(view)
         ents = self.entries
-        auto = self.A if not free_only else (self.F if wide else self.F8)
+        if auto is None:
+            auto = self.A if not free_only else (self.F if wide else self.F8)
         for end, (eid, enc, klen) in auto.iter(view):
             e = end + 1
             s = e - klen
             if ents[eid].tier == "P":
+                if self.no_protect:
+                    continue
                 # a protected file name counts only when an extension follows
                 if enc == "u16":
                     if not (bytes_view and view[e:e + 2] == ".\x00" and e + 2 < n and view[e + 2].isalnum()):
@@ -224,23 +273,33 @@ class Engine:
                         continue
                 out.append((s, e, eid, enc))
                 continue
+            if eid in self.scoped_sub:
+                if enc == "u16" and not bytes_view:
+                    continue
+                if enc not in ("x", "u16") and not bytes_view:
+                    continue
+                out.append((s, e, eid, enc))
+                continue
             if enc == "u16":
                 if not bytes_view:
                     continue
-                loose = ents[eid].nchar >= 5
+                loose = ents[eid].nchar >= 5 or eid in self.scoped
                 if s >= 2 and view[s - 1] == "\x00" and view[s - 2].isalnum() and view[s - 2] < "\x80":
-                    if not (loose and self._camel16(orig, s, n)):
+                    if not ((loose and self._camel16(orig, s, n)) or self._digit_edge(ents[eid], view, s - 2, s)):
                         continue
                 if e + 1 < n and view[e + 1] == "\x00" and view[e].isalnum() and view[e] < "\x80":
-                    if not (loose and self._camel16(orig, e, n)):
+                    if not ((loose and self._camel16(orig, e, n)) or self._digit_edge(ents[eid], view, e, e - 2)):
                         continue
             else:
-                loose = ents[eid].nchar >= 5
-                if s > 0 and view[s - 1].isalnum():
-                    if not (loose and self._camel(orig, s)):
+                loose = ents[eid].nchar >= 5 or eid in self.scoped
+                # In a binary stream a byte >= 0x80 next to an ASCII name is a
+                # tag or length byte, not a letter: it ends the word.
+                if s > 0 and view[s - 1].isalnum() and not (binary and orig[s - 1] >= "\x80"):
+                    if not ((loose and self._camel(orig, s)) or self._digit_edge(ents[eid], view, s - 1, s)
+                            or (binary and ents[eid].nchar >= 4 and _tagged(orig, view, s, e, n))):
                         continue
-                if e < n and view[e].isalnum():
-                    if not (loose and self._camel(orig, e)):
+                if e < n and view[e].isalnum() and not (binary and orig[e] >= "\x80"):
+                    if not ((loose and self._camel(orig, e)) or self._digit_edge(ents[eid], view, e, e - 1)):
                         continue
                 if enc != "x" and not bytes_view:
                     continue
@@ -278,10 +337,261 @@ class Engine:
 
     # ------------------------------------------------------------------
     def _free_ok(self, ent):
-        """May this entry be replaced in free text of the current group?"""
+        """May this entry be replaced in free text of the current file?"""
         if ent.tier == "A":
             return True
-        return ent.tier == "L" and self.group in ent.groups
+        if ent.tier == "L" and self._home(ent):
+            return True
+        return ent.eid in self.scoped
+
+    def _home(self, ent):
+        """Is the current file in a source group where this identity was seen
+        (its own group, or the group of an exact copy of the file)?"""
+        if self.group in ent.groups:
+            return True
+        return bool(self.extra_groups) and not self.extra_groups.isdisjoint(ent.groups)
+
+    # ------------------------------------------------------------------
+    # document scope
+    # ------------------------------------------------------------------
+    def scope_begin(self):
+        self.scoped = set()
+        self.scoped_sub = set()
+        self._scope_auto = None
+
+    def scope_save(self):
+        return (self.scoped, self.scoped_sub, self._scope_auto, self.no_protect, self.group, self.extra_groups)
+
+    def scope_restore(self, state):
+        (self.scoped, self.scoped_sub, self._scope_auto, self.no_protect, self.group, self.extra_groups) = state
+
+    def scope_promote(self, eids):
+        """Add identities to the scope of the current file. For a name of
+        several words its distinctive words are added too, so a surname that
+        stands alone elsewhere in the document is also replaced. Returns True
+        when the scope grew."""
+        before = len(self.scoped)
+        for eid in eids:
+            ent = self.entries[eid]
+            if ent.tier == "P":
+                continue
+            if len(ent.tokens) == 1:
+                if ent.word != 2:
+                    self.scoped.add(eid)
+                continue
+            self.scoped.add(eid)
+            for tok, keep in zip(ent.tokens, ent.keep):
+                if keep or len(tok) < 4 or tok.isdigit():
+                    continue            # short parts ("iit" of "icub-tech-iit") are too ambiguous alone
+                sid = self.single.get(tok)
+                if sid is None:
+                    sid = self._virtual(tok)
+                if sid is not None and self.entries[sid].word != 2:
+                    self.scoped.add(sid)
+        if len(self.scoped) == before:
+            return False
+        for eid in self.scoped:
+            ent = self.entries[eid]
+            if len(ent.tokens) == 1 and not ent.word:
+                t = ent.tokens[0]
+                if len(t) >= 6 or (len(t) >= 5 and any(c.isdigit() for c in t)):
+                    self.scoped_sub.add(eid)
+        auto = ahocorasick.Automaton()
+        n = 0
+        for eid in self.scoped:
+            ent = self.entries[eid]
+            if ent.tier in ("B", "V"):         # these keys are not in the free-text automata
+                for k, v in self.keys_of.get(eid, ()):
+                    auto.add_word(k, v)
+                    n += 1
+        if n:
+            auto.make_automaton()
+            self._scope_auto = auto
+        else:
+            self._scope_auto = None
+        return True
+
+    def field_pseudonym(self, text, force=False):
+        """Pseudonym for the value of an identity field (author, company,
+        last saved by) that the dictionary left unchanged. A value that is a
+        placeholder, a product name, a sentence or ordinary words is returned
+        as it is; otherwise every name-like word gets its token pseudonym
+        (the same one that word has anywhere else in the corpus). Returns
+        (new text, list of pseudonymised tokens).
+
+        force=True is for fields that hold an account or a person and nothing
+        else (last saved by, author, the user folder of a stored path): there
+        even an ordinary-looking account name ("Administrator", "user") is
+        the identity, so every word is replaced. Only values that say "no
+        value" and the system profile folders stay."""
+        if not text or len(text) > (120 if force else 64):
+            return text, []
+        toks = pseudo.tokens_of(text)
+        if not toks or len(toks) > (8 if force else 5):
+            return text, []
+        if force:
+            if " ".join(toks) in _ABSENT:
+                return text, []
+            names = [t for t in toks if any(c.isalpha() for c in t) and t not in self.struct]
+            if not names:
+                names = [t for t in toks if any(c.isalpha() for c in t)]
+            if not names and len(toks) == 1 and toks[0].isdigit() and 4 <= len(toks[0]) <= 12:
+                names = list(toks)
+            if not names:
+                return text, []
+            return self._pseudonymise_words(text, set(names))
+        if not self.common:
+            return text, []
+        if "".join(toks) in self.generic:
+            return text, []
+        names = []
+        for t in toks:
+            if t in self.keeptok or t in self.generic:
+                continue
+            if t.isdigit():
+                if len(toks) == 1 and 4 <= len(t) <= 12:
+                    names.append(t)
+                continue
+            if (len(t) < 2 and t.isascii()) or not any(c.isalpha() for c in t):
+                continue
+            base = t.rstrip("0123456789")
+            if base != t and (base in self.keeptok or base in self.generic or base in self.common):
+                continue                    # "staff1", "user2"
+            if t in self.proper or t not in self.common:
+                names.append(t)
+        if not names:
+            return text, []
+        return self._pseudonymise_words(text, set(names))
+
+    def _pseudonymise_words(self, text, want):
+        out = []
+        cur = []
+        done = []
+
+        def flush():
+            if not cur:
+                return
+            word = "".join(cur)
+            c = pseudo.canon(word)
+            if c in want:
+                ps = self.pz.token(c)
+                k = 0
+                for ch in word:
+                    if pseudo.canon_char(ch) and k < len(ps):
+                        out.append(pseudo._shape(ch, ps[k]))
+                        k += 1
+                    else:
+                        out.append(ch)
+                done.append(c)
+            else:
+                out.append(word)
+            del cur[:]
+
+        for ch in text:
+            if pseudo.canon_char(ch):
+                cur.append(ch)
+            else:
+                flush()
+                out.append(ch)
+        flush()
+        new = "".join(out)
+        return (new, done) if new != text else (text, [])
+
+    def number_pseudonym(self, text):
+        """Replace every run of two or more digits by its token pseudonym
+        (digits stay digits, same length): telephone numbers."""
+        out = []
+        cur = []
+
+        def flush():
+            if cur:
+                run = "".join(cur)
+                out.append(self.pz.token(run) if len(run) >= 2 else run)
+                del cur[:]
+
+        for ch in text:
+            if "0" <= ch <= "9":
+                cur.append(ch)
+            else:
+                flush()
+                out.append(ch)
+        flush()
+        return "".join(out)
+
+    def _virtual(self, tok, force=False):
+        """Entry for one word of a longer name that has no entry of its own
+        ("chemnitz" of "TU Chemnitz"). It exists only for document scope: it
+        is never matched unless its name is in scope for the current file."""
+        if tok not in self.pz.table and not force:
+            return None
+        e = Entry()
+        e.eid = len(self.entries)
+        e.tokens = [tok]
+        e.keep = [0]
+        e.tier = "V"
+        e.cls = "PART"
+        e.word = self.tokflag.get(tok, 0)
+        if not e.word and tok in self.common:
+            e.word = 2
+        elif not e.word and tok in self.proper:
+            e.word = 1
+        e.pseudo = self.pz.token(tok)
+        e.mask = "0" * len(tok)
+        e.nchar = len(e.pseudo)
+        e.groups = None
+        self.entries.append(e)
+        self.single[tok] = e.eid
+        keys = [(norm_text(tok), (e.eid, "x", len(norm_text(tok))))]
+        k16 = norm_bytes(tok.encode("utf-16-le"))
+        keys.append((k16, (e.eid, "u16", len(k16))))
+        self.keys_of[e.eid] = keys
+        return e.eid
+
+    def scope_tokens(self, tokens):
+        """Put single words into the scope of the current file (words of an
+        identity-field value that was pseudonymised without a dictionary
+        entry). Returns True when the scope grew."""
+        ids = set()
+        for t in tokens:
+            if len(t) < 3 and not (len(t) == 2 and not t.isascii()):
+                continue
+            sid = self.single.get(t)
+            if sid is None:
+                sid = self._virtual(t, force=True)
+            if sid is not None:
+                ids.add(sid)
+        return self.scope_promote(ids) if ids else False
+
+    def _text_hits(self, view, text):
+        hits = self._hits(view, text, False)
+        if self._scope_auto is not None:
+            more = self._hits(view, text, False, auto=self._scope_auto)
+            if more:
+                hits = list(set(hits) | set(more))
+        return hits
+
+    def match_ids(self, text, ctx="text"):
+        """Entry ids matched in a real string (same rules as spans_text)."""
+        if not text or not self.nkeys:
+            return set()
+        view = norm_text(text)
+        if len(view) != len(text):
+            return set()
+        hits = [h for h in self._text_hits(view, text)
+                if ctx == "id" or (self.entries[h[2]].tier != "P" and self._free_ok(self.entries[h[2]]))]
+        return {h[2] for h in self._select(hits) if self.entries[h[2]].tier != "P"}
+
+    def _scope_surface_ok(self, ent, surface, prev="", nxt=""):
+        """A scoped name that is also an ordinary word of some language is
+        replaced only where it is written as a proper noun (capitalised) or
+        as part of an address, path or identifier ("/acme-docs", "acme.org",
+        "acme_v2")."""
+        if ent.word == 1 and ent.eid in self.scoped and ent.tier != "A" and \
+                not (ent.tier == "L" and self._home(ent)):
+            if surface[:1].isupper():
+                return True
+            return (prev in _JOIN and prev != "") or (nxt in _JOIN and nxt != "")
+        return True
 
     def spans_text(self, text, ctx="text"):
         """Dictionary matches in a real string as (start, end, replacement)."""
@@ -290,12 +600,14 @@ class Engine:
         view = norm_text(text)
         if len(view) != len(text):
             return []
-        hits = [h for h in self._hits(view, text, False)
+        hits = [h for h in self._text_hits(view, text)
                 if ctx == "id" or self.entries[h[2]].tier == "P" or self._free_ok(self.entries[h[2]])]
         out = []
         for s, e, eid, _enc in self._select(hits):
             ent = self.entries[eid]
             if ent.tier == "P" or pseudo.canon(text[s:e]) != "".join(ent.tokens):
+                continue
+            if ctx != "id" and not self._scope_surface_ok(ent, text[s:e], text[s - 1:s] if s else "", text[e:e + 1]):
                 continue
             rep = self._render(ent, text[s:e])
             if rep is None or rep == text[s:e]:
@@ -311,7 +623,7 @@ class Engine:
         view = norm_text(text)
         if len(view) != len(text):
             return text, 0
-        hits = [h for h in self._hits(view, text, False)
+        hits = [h for h in self._text_hits(view, text)
                 if ctx == "id" or self.entries[h[2]].tier == "P" or self._free_ok(self.entries[h[2]])]
         if not hits:
             return text, 0
@@ -322,6 +634,9 @@ class Engine:
             if self.entries[eid].tier == "P":
                 continue
             if pseudo.canon(text[s:e]) != "".join(self.entries[eid].tokens):
+                continue
+            if ctx != "id" and not self._scope_surface_ok(self.entries[eid], text[s:e],
+                                                           text[s - 1:s] if s else "", text[e:e + 1]):
                 continue
             rep = self._render(self.entries[eid], text[s:e])
             if rep is None or rep == text[s:e]:
@@ -337,7 +652,8 @@ class Engine:
     CHUNK = 32 << 20
     OVERLAP = 4096
 
-    def plan_bytes(self, raw, id_spans=(), text_ok=True, lo=0, hi=None, fixed=True, wide=True):
+    def plan_bytes(self, raw, id_spans=(), text_ok=True, lo=0, hi=None, fixed=True, wide=True, binary=False,
+                   force_ids=None):
         """Find replacements in a bytes-like object (bytes, bytearray, mmap).
 
         id_spans : sorted list of (start, end) spans with identity context.
@@ -346,6 +662,8 @@ class Engine:
         lo, hi   : restrict the scan to raw[lo:hi].
         wide     : also look for UTF-16LE spellings in free text (binary
                    streams); text files pass wide=False.
+        binary   : the input is a binary stream (not a text file): bytes
+                   >= 0x80 beside an ASCII match count as word boundaries.
         fixed    : drop replacements whose encoded byte length differs from
                    the original (only possible for accented UTF-8 text);
                    with fixed=False they are returned and the caller must
@@ -355,6 +673,60 @@ class Engine:
         """
         if not self.nkeys:
             return []
+        self._binary = bool(binary)
+        try:
+            out = self._plan_bytes(raw, id_spans, text_ok, lo, hi, fixed, wide)
+        finally:
+            self._binary = False
+        if force_ids:
+            out = self._force_spans(raw, out, force_ids, fixed)
+        return out
+
+    def _force_spans(self, raw, out, spans, fixed):
+        """Account / person fields the dictionary left as they were: replace
+        the whole value word by word (see field_pseudonym, force=True)."""
+        extra = []
+        for a, b in spans:
+            if b <= a or b - a > 400 or any(s < b and e > a for s, e, _nb in out):
+                continue
+            seg = bytes(raw[a:b])
+            wide = len(seg) >= 4 and len(seg) % 2 == 0 and not any(seg[1::2]) and all(seg[0::2][:2])
+            if wide:
+                core = seg
+                while len(core) >= 2 and core[-2:] == b"\x00\x00":
+                    core = core[:-2]
+                codec = "utf-16-le"
+            else:
+                core = seg.rstrip(b"\x00")
+                codec = "utf-8"
+            if not core:
+                continue
+            try:
+                text = core.decode(codec)
+            except UnicodeDecodeError:
+                if wide:
+                    continue
+                codec = "cp1252"
+                try:
+                    text = core.decode(codec)
+                except UnicodeDecodeError:
+                    continue
+            new, toks = self.field_pseudonym(text, force=True)
+            if not toks or new == text:
+                continue
+            try:
+                nb = new.encode(codec)
+            except UnicodeEncodeError:
+                continue
+            if len(nb) != len(core) and fixed:
+                continue
+            extra.append((a, a + len(core), nb))
+            self.stats[-1] = self.stats.get(-1, 0) + 1
+        if not extra:
+            return out
+        return sorted(out + extra)
+
+    def _plan_bytes(self, raw, id_spans, text_ok, lo, hi, fixed, wide):
         n = len(raw) if hi is None else hi
         hits = []
         # 1. identity spans: every tier, scanned with the full automaton
@@ -379,7 +751,11 @@ class Engine:
                 b = min(n, pos + self.CHUNK + self.OVERLAP)
                 view = norm_bytes(bytes(raw[a:b]))
                 limit = pos + self.CHUNK
-                for s, e, eid, enc in self._hits(view, _LazyOrig(raw, a), True, free_only=True, wide=wide):
+                found = self._hits(view, _LazyOrig(raw, a), True, free_only=True, wide=wide)
+                if self._scope_auto is not None:
+                    found = found + self._hits(view, _LazyOrig(raw, a), True, free_only=True, wide=wide,
+                                               auto=self._scope_auto)
+                for s, e, eid, enc in found:
                     s += a
                     e += a
                     if s < pos or s >= limit:
@@ -388,6 +764,8 @@ class Engine:
                     if ent.tier != "P":
                         if not self._free_ok(ent):
                             continue
+                        if self._binary and ent.nchar < 4 and enc != "u16" and not _long_run(raw, s, e, n):
+                            continue      # a 3-letter name in binary data: too easily a chance match
                         if text_ok is not True:
                             # predicates marked .span get the whole match
                             if getattr(text_ok, "span", False):
@@ -419,6 +797,9 @@ class Engine:
                 # final verification on the real (un-normalised) characters
                 if pseudo.canon(surface) != "".join(self.entries[eid].tokens):
                     continue
+                if not self._scope_surface_ok(self.entries[eid], surface,
+                                              chr(raw[s - 1]) if s > 0 else "", chr(raw[e]) if e < len(raw) else ""):
+                    continue
                 rep = self._render(self.entries[eid], surface)
                 if rep is None:
                     continue
@@ -430,6 +811,34 @@ class Engine:
             out.append((s, e, nb))
             self.stats[eid] = self.stats.get(eid, 0) + 1
         return out
+
+
+def _tagged(orig, view, s, e, n):
+    """Binary records put a tag or length byte in front of a string, and that
+    byte can happen to be a letter or digit ("\x05OICUB3_020.PRT"). A match
+    is accepted behind one or two such bytes when they follow a
+    non-printable byte and the match goes on like an identifier or file
+    name (digit, underscore, dot or hyphen next)."""
+    if e >= n or view[e] not in "0123456789_.-":
+        return False
+    k = s - 1
+    if k >= 1 and view[k - 1].isalnum():
+        k -= 1                               # two tag bytes
+    if k == 0:
+        return True
+    c = orig[k - 1]
+    return not (" " <= c < "\x7f")
+
+
+def _long_run(raw, s, e, n, need=12):
+    """Is raw[s:e] part of a run of at least `need` printable ASCII bytes?"""
+    a = s
+    while a > 0 and s - a < need and 0x20 <= raw[a - 1] < 0x7F:
+        a -= 1
+    b = e
+    while b < n and (b - a) < need and 0x20 <= raw[b] < 0x7F:
+        b += 1
+    return b - a >= need
 
 
 class _LazyOrig:
