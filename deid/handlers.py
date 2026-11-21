@@ -20,7 +20,7 @@ from . import fmt_step, fmt_iges, fmt_sw, oleprops, engine as E
 from .build_dict import label_class, name_class
 
 OPTS = {"rename": False, "pdftext": False, "creo": False, "zlb": False, "strings": False, "dwg": False,
-        "dwgobj": False, "scope": False, "nofallback": False, "pdfextra": False, "pdfthumbs": True, "previews": False, "logos": None}
+        "dwgobj": False, "scope": False, "nofallback": False, "pdfmeta": False, "pdfextra": False, "pdfthumbs": True, "previews": False, "logos": None}
 BLOB_RUN = 160
 _B64 = frozenset(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=")
 
@@ -242,29 +242,50 @@ def _text_nodes(buf, a, b):
     return out
 
 
-def field_regions(buf, n, kind, name=""):
-    """Identity-field spans for text formats, as (start, end) tuples."""
+_PERSON_TAGS = (b"dc:creator", b"pdf:Author", b"xmp:Author", b"cp:lastModifiedBy", b"dc:lastModifiedBy")
+
+
+def field_regions(buf, n, kind, name="", persons=None):
+    """Identity-field spans for text formats, as (start, end) tuples. With a
+    list in `persons`, the spans of fields that hold an account or a person
+    and nothing else (creator, last modified by, last saved by) are added to
+    it as well."""
     ids = []
+    pp = persons if persons is not None else []
     head = bytes(buf[:min(n, 8 << 20)])
     if kind in ("svg", "xml", "text"):
         if b"<" in head[:4096] or kind != "text":
             for m in _XML_ID.finditer(head):
-                ids.extend(_text_nodes(head, m.start(2), m.end(2)))
+                nodes = _text_nodes(head, m.start(2), m.end(2))
+                ids.extend(nodes)
+                if m.group(1) in _PERSON_TAGS:
+                    pp.extend(nodes)
             for m in _FC_ID.finditer(head[:1 << 18]):
                 ids.append(m.span(1))
+                if b"Company" not in m.group(0)[:40]:
+                    pp.append(m.span(1))
             for m in _3MF_ID.finditer(head[:1 << 18]):
                 ids.append(m.span(1))
+                if re.match(rb"(?i)<metadata\s+name=\"(?:Designer|Author|Creator)\"", m.group(0)):
+                    pp.append(m.span(1))
             for m in _SWPROP.finditer(head):
                 nm = m.group(1).decode("latin-1")
                 if name_class(nm) or nm.lower() == "author":
                     ids.append(m.span(2))
+                    if name_class(nm) == "PERSON" or nm.lower() == "author":
+                        pp.append(m.span(2))
         for m in _XT_ID.finditer(head[:8192]):
             ids.append(m.span(1))
+            if m.group(0).lstrip()[:4] == b"USER":
+                pp.append(m.span(1))
         for m in _PS_ID.finditer(head[:8192]):
             ids.append(m.span(1))
+            if m.group(0).startswith((b"%%For", b"%%Author")):
+                pp.append(m.span(1))
     elif kind == "dxf":
         for m in _DXF_ID.finditer(head[:1 << 20]):
             ids.append(m.span(1))
+            pp.append(m.span(1))
     return ids
 
 
@@ -283,10 +304,9 @@ def plan_text(eng, buf, n, kind, name="", anchors=True, fixed=False):
             regs += [r for r in R.scan_emails(buf, n, limit=20000) if r.label == "email.local"]
             regs += [r for r in R.scan_urls(buf, n, limit=20000) if r.label == "url.forge.owner"]
     ids = [(r.start, r.end) for r in regs if r.ctx == "id" and r.omap is None]
-    fields = field_regions(buf, n, kind, name)
     forced = [(r.start, r.end) for r in regs if r.ctx == "id" and r.omap is None and (
         r.label == "userpath.user" or label_class(r.label) in ("PERSON", "ACCOUNT"))]
-    forced += fields
+    fields = field_regions(buf, n, kind, name, forced)
     ids += fields
     ids = sorted(set(ids))
     # drop spans nested in / overlapping an earlier one
@@ -706,13 +726,10 @@ def h_pdf(eng, src, dst, name):
     the start, and identities met while processing are swept once more."""
     if not OPTS.get("scope"):
         return _h_pdf_once(eng, src, dst, name)
-    # A PDF is read by people, not resolved by CAD software: a file name
-    # printed in it is text, so the names kept for references are not kept here.
-    eng.no_protect = True
-    try:
-        return _h_pdf_scoped(eng, src, dst, name)
-    finally:
-        eng.no_protect = False
+    # A file name printed in a drawing (its own number, the model it shows)
+    # is kept exactly when the file keeps that name, as in every other
+    # format: the drawing and the file it names must go on matching.
+    return _h_pdf_scoped(eng, src, dst, name)
 
 
 def _h_pdf_scoped(eng, src, dst, name):
@@ -723,9 +740,18 @@ def _h_pdf_scoped(eng, src, dst, name):
     ch, info = _h_pdf_once(eng, src, dst, name)
     if not ch:
         return ch, info
-    if eng.scope_promote(set(eng.stats) - seen):
+    if eng.scope_promote(set(k for k in eng.stats if k >= 0) - seen):
         tmp2 = dst + ".p2~"
         os.replace(dst, tmp2)
+        # The sweep applies dictionary and scope replacements only. Values
+        # that were pseudonymised without a dictionary entry in the first
+        # pass (author fields, contact details, descriptive metadata) must
+        # not be touched again: a pseudonym is not in the dictionary either,
+        # and replacing it a second time would give this document another
+        # pseudonym than a document that needed no sweep.
+        saved = OPTS.get("nofallback")
+        OPTS["nofallback"] = True
+        pdftext.CONTACTS = None
         try:
             ch2, info2 = _h_pdf_once(eng, tmp2, dst, name)
             if ch2:
@@ -741,6 +767,7 @@ def _h_pdf_scoped(eng, src, dst, name):
             if os.path.exists(tmp2):
                 os.replace(tmp2, dst)
         finally:
+            OPTS["nofallback"] = saved
             try:
                 os.unlink(tmp2)
             except OSError:
@@ -794,11 +821,18 @@ def _h_pdf_once(eng, src, dst, name):
                 pass
 
 
-def _pdf_extras(eng, pdf, text_changed):
+def _pdf_extras(eng, pdf, text_changed, fieldmap=None):
     """Bookmarks, annotation authors / comments, page thumbnails and form
     field values. Returns the number of changes."""
     import pikepdf
     n = 0
+    info_og = None
+    try:
+        _i = pdf.trailer.get("/Info")
+        if _i is not None:
+            info_og = _i.objgen
+    except Exception:
+        info_og = None
 
     def fix(obj, key, ctx):
         nonlocal n
@@ -892,16 +926,32 @@ def _pdf_extras(eng, pdf, text_changed):
                     if key in d:
                         fix(d, key, "text")
                 # a second document-information dictionary (kept by some
-                # producers next to the one the trailer points to)
+                # producers next to the one the trailer points to): the same
+                # values get the same replacements as in the real one, which
+                # itself was handled before and must not be touched again
                 if "/Author" in d or "/Company" in d or "/Manager" in d:
+                    if info_og is not None and getattr(d, "objgen", None) == info_og:
+                        continue
                     if "/Type" not in d and ("/Producer" in d or "/Creator" in d or "/CreationDate" in d
                                              or "/ModDate" in d or "/Title" in d):
-                        for key in ("/Author", "/Company", "/Manager"):
-                            if key in d:
-                                fix(d, key, "id")
-                        for key in ("/Title", "/Subject", "/Keywords"):
-                            if key in d:
-                                fix(d, key, "text")
+                        for key in ("/Author", "/Company", "/Manager", "/Title", "/Subject", "/Keywords",
+                                    "/Creator", "/Producer"):
+                            try:
+                                v = d.get(key)
+                                if not isinstance(v, pikepdf.String):
+                                    continue
+                                sv = str(v)
+                                if fieldmap and sv in fieldmap:
+                                    d[key] = pikepdf.String(fieldmap[sv])
+                                    n += 1
+                                elif key in ("/Author", "/Company", "/Manager", "/Title", "/Subject", "/Keywords"):
+                                    new = replace_str(eng, sv, "id" if key in ("/Author", "/Company", "/Manager")
+                                                      else "text")
+                                    if new != sv:
+                                        d[key] = pikepdf.String(new)
+                                        n += 1
+                            except Exception:
+                                continue
                 typ = d.get("/Type")
                 if typ is not None and str(typ) in ("/OCG", "/StructElem"):
                     fix(d, "/Name" if str(typ) == "/OCG" else "/T", "text")
@@ -963,10 +1013,46 @@ def _pdf_attachments(pdf):
     return n
 
 
+_XMP_DESC = re.compile(
+    rb"<((?:xmp:CreatorTool|pdf:Producer|pdf:Keywords|dc:title|dc:description|dc:subject|xmp:Label|"
+    rb"photoshop:Headline|photoshop:Source|xmpDM:[A-Za-z]+|pdfx:[A-Za-z_0-9]+))\b([^>]*)>(.*?)</\1>", re.S)
+_XMP_TEXT = re.compile(rb">([^<>]+)<")
+
+
+def _xmp_words(eng, raw):
+    """Word-by-word pseudonyms for the descriptive elements of an XMP packet
+    (title, description, keywords, producing software)."""
+    def one_node(m):
+        try:
+            t = html.unescape(m.group(1).decode("utf-8"))
+        except UnicodeDecodeError:
+            return m.group(0)
+        if not t.strip() or re.fullmatch(r"[\d\sT:.+\-Z/]*", t):
+            return m.group(0)
+        new = eng.words_pseudonym(t)
+        if new == t:
+            return m.group(0)
+        return b">" + html.escape(new, quote=False).encode("utf-8") + b"<"
+
+    def one_el(m):
+        inner = m.group(3)
+        if b"<" in inner:
+            body = _XMP_TEXT.sub(one_node, b">" + inner + b"<")[1:-1]
+        else:
+            body = one_node(re.match(rb">(.*)<", b">" + inner + b"<", re.S))[1:-1] if inner.strip() else inner
+        return b"<" + m.group(1) + m.group(2) + b">" + body + b"</" + m.group(1) + b">"
+
+    try:
+        return _XMP_DESC.sub(one_el, raw)
+    except Exception:
+        return raw
+
+
 def _pdf_meta(eng, src, dst, name, ntext, orig_src):
     import pikepdf
     n = 0
     fieldmap = {}        # identity-field values replaced in this document: original -> new
+    metaall = bool(OPTS.get("pdfmeta")) and not OPTS.get("nofallback")
     with pikepdf.open(src) as pdf:
         npages = len(pdf.pages)
         info = pdf.trailer.get("/Info")
@@ -976,11 +1062,31 @@ def _pdf_meta(eng, src, dst, name, ntext, orig_src):
                     v = info[k]
                 except Exception:
                     continue
-                if not isinstance(v, pikepdf.String) or k in _PDF_SKIP:
+                if not isinstance(v, pikepdf.String):
+                    continue
+                if k in _PDF_SKIP:
+                    # producing software and dates: left alone, unless every
+                    # descriptive metadata value is to be pseudonymised
+                    if metaall and str(k) in ("/Creator", "/Producer"):
+                        s = str(v)
+                        new = eng.words_pseudonym(s)
+                        if new != s:
+                            info[k] = pikepdf.String(new)
+                            n += 1
+                            if len(s) >= 3:
+                                fieldmap[s] = new
                     continue
                 s = str(v)
                 key = str(k).lstrip("/")
                 ctx = "id" if label_class("pdf.info." + key.lower()) else "text"
+                if metaall and ctx != "id":
+                    new = eng.words_pseudonym(s)
+                    if new != s:
+                        info[k] = pikepdf.String(new)
+                        n += 1
+                        if len(s) >= 3:
+                            fieldmap[s] = new
+                    continue
                 new = replace_str(eng, s, ctx)
                 if new == s and ctx == "id" and OPTS.get("scope") and not OPTS.get("nofallback"):
                     new, toks = eng.field_pseudonym(s)
@@ -1041,13 +1147,18 @@ def _pdf_meta(eng, src, dst, name, ntext, orig_src):
                             upd = upd.replace(a, esc(new_v).encode("utf-8"))
                 if upd != cur:
                     buf = bytearray(upd)
+            if metaall:
+                cur = bytes(buf) if buf is not None else raw
+                upd = _xmp_words(eng, cur)
+                if upd != cur:
+                    buf = bytearray(upd)
             if buf is not None and bytes(buf) != raw:
                 obj.write(bytes(buf))
                 nx += 1
         nextra = 0
         natt = 0
         if OPTS.get("pdfextra"):
-            nextra = _pdf_extras(eng, pdf, ntext > 0)
+            nextra = _pdf_extras(eng, pdf, ntext > 0, fieldmap)
             natt = _pdf_attachments(pdf)
         n += nextra + natt
         if not (n or nx or ntext):
@@ -1228,6 +1339,40 @@ def _force(ids):
     return list(ids) if (OPTS.get("scope") and not OPTS.get("nofallback")) else None
 
 
+def _propset_recode(eng, seg, enc, cls, force):
+    """A property string in a code page the planner cannot scan bytewise:
+    decode it, plan on the UTF-8 text, encode the result in the same code
+    page. Returns the new slot contents (same size, NUL padded) or None."""
+    try:
+        body = seg.rstrip(b"\x00")
+        text = body.decode(enc)
+        u = text.encode("utf-8")
+    except (UnicodeError, LookupError):
+        return None
+    if not text.strip():
+        return None
+    if cls in ("PERSON", "ORG", "ACCOUNT"):
+        ids = [(0, len(u))]
+    else:
+        ids = [(r.start, r.end) for r in R.scan_userpaths(u, len(u))]
+    try:
+        sub = eng.plan_bytes(u, ids, True, fixed=False,
+                             force_ids=[(0, len(u), "utf-8")] if force and cls in ("PERSON", "ACCOUNT") else None)
+    except Exception:
+        return None
+    if not sub:
+        return None
+    nu = bytearray(u)
+    E.apply_plan(nu, sub)
+    try:
+        nb = bytes(nu).decode("utf-8").encode(enc)
+    except (UnicodeError, LookupError):
+        return None
+    if nb == body or len(nb) > len(body):
+        return None
+    return nb + b"\x00" * (len(seg) - len(nb))
+
+
 def plan_propset(eng, data):
     plan = []
     for ps in oleprops.parse(data):
@@ -1242,12 +1387,19 @@ def plan_propset(eng, data):
             ids = [(r.start, r.end) for r in R.scan_userpaths_utf16(seg, len(seg))]
         else:
             ids = [(r.start, r.end) for r in R.scan_userpaths(seg, len(seg))]
+        force = _force(ids) if cls in ("PERSON", "ACCOUNT") else None
+        if force:
+            force = [(a, b, ps.enc) for a, b in force]        # the value is read in the property's own encoding
         if ps.enc not in ("utf-16-le", "utf-8", "cp1252", "latin-1", "ascii", "gbk", "cp936"):
-            # other code pages: only pure-ASCII values are safe to rewrite bytewise
+            # other code pages (Cyrillic, Japanese, ...): only pure-ASCII
+            # values are rewritten bytewise; anything else goes through
+            # Unicode and back, and must fit the slot it came from
             if not seg.isascii():
+                nb = _propset_recode(eng, seg, ps.enc, cls, bool(force))
+                if nb is not None:
+                    plan.append((ps.off, ps.off + ps.nbytes, nb))
                 continue
-        sub = eng.plan_bytes(seg, ids, True, fixed=False,
-                             force_ids=_force(ids) if cls in ("PERSON", "ACCOUNT") else None)
+        sub = eng.plan_bytes(seg, ids, True, fixed=False, force_ids=force)
         if not sub:
             continue
         if all(len(nb) == e - s for s, e, nb in sub):
@@ -1265,6 +1417,37 @@ def plan_propset(eng, data):
     return plan
 
 
+def _wide_text_unit(u):
+    """Is this UTF-16 code unit a character of ordinary text (Latin, Greek,
+    Cyrillic, kana, CJK ideographs, Hangul)?"""
+    return (0x20 <= u < 0x7F or 0xC0 <= u <= 0x24F or 0x370 <= u <= 0x3FF or 0x400 <= u <= 0x4FF
+            or 0x3040 <= u <= 0x30FF or 0x4E00 <= u <= 0x9FFF or 0xAC00 <= u <= 0xD7A3)
+
+
+def _in_cstring(data, s, e):
+    """Is [s, e) inside a UTF-16 string with the MFC marker in front of it
+    (FF FE FF, then the length in code units: one byte, or FF and 16 bits)?
+    Such a string is text whatever script it is written in."""
+    lo = max(0, s - 1300)
+    i = data.rfind(b"\xff\xfe\xff", lo, s)
+    tries = 0
+    n = len(data)
+    while i >= 0 and tries < 3:
+        tries += 1
+        if i + 4 <= n:
+            ln = data[i + 3]
+            start = i + 4
+            if ln == 0xFF and i + 6 <= n:
+                ln = data[i + 4] | (data[i + 5] << 8)
+                start = i + 6
+            if ln and start <= s and e <= start + 2 * ln and (s - start) % 2 == 0:
+                return True
+        if i == 0:
+            break
+        i = data.rfind(b"\xff\xfe\xff", lo, i)
+    return False
+
+
 def string_run_ok(data, n):
     """Predicate for unparsed binary streams: is the match [s, e) text?
 
@@ -1274,15 +1457,20 @@ def string_run_ok(data, n):
       * it lies in a run of at least 12 printable characters (a path, a
         sentence, markup), or
       * it *is* a complete string: the printable run is exactly the match and
-        is NUL-terminated or preceded by its own length byte.
-    The same rules apply to UTF-16LE text (code units instead of bytes)."""
+        is NUL-terminated or preceded by its own length byte, or
+      * it lies inside a length-prefixed UTF-16 string (MFC marker).
+    The same rules apply to UTF-16LE text (code units instead of bytes),
+    in the Latin range and, with a stricter run rule, in other scripts."""
     def ok(s, e):
-        if s + 1 < n and data[s + 1] == 0 and 0x20 <= data[s] < 0x7F:
+        if _in_cstring(data, s, e):
+            return True
+        if s + 1 < n and data[s + 1] == 0 and (0x20 <= data[s] < 0x7F or data[s] >= 0xC0):
+            # UTF-16 text in the Latin range (accented letters included)
             a = s
-            while a >= 2 and data[a - 1] == 0 and 0x20 <= data[a - 2] < 0x7F and s - a < 1600:
+            while a >= 2 and data[a - 1] == 0 and (0x20 <= data[a - 2] < 0x7F or data[a - 2] >= 0xC0) and s - a < 1600:
                 a -= 2
             b = s
-            while b + 1 < n and data[b + 1] == 0 and 0x20 <= data[b] < 0x7F and b - s < 1600:
+            while b + 1 < n and data[b + 1] == 0 and (0x20 <= data[b] < 0x7F or data[b] >= 0xC0) and b - s < 1600:
                 b += 2
             units = (b - a) // 2
             if units >= 12:
@@ -1291,9 +1479,24 @@ def string_run_ok(data, n):
                 # whole string: MFC length prefix, or NUL code unit on both sides
                 if a >= 1 and data[a - 1] == units and (a < 4 or data[a - 4:a - 1] == b"\xff\xfe\xff"):
                     return True
+                # 32-bit length in front (code units, or bytes as in a BSTR)
+                if a >= 4 and units >= 3 and data[a - 3:a] == b"\x00\x00\x00" and data[a - 4] in (units, 2 * units):
+                    return True
                 if b + 1 < n and data[b] == 0 and data[b + 1] == 0 and a >= 2 and data[a - 1] == 0 and data[a - 2] == 0:
                     return True
             return False
+        if (e - s) % 2 == 0 and e - s >= 4 and e <= n and any(data[k + 1] for k in range(s, e, 2)):
+            # UTF-16 text in another script (Cyrillic, CJK, ...): a run of at
+            # least 12 text code units around the match, some of them ASCII
+            # (a path, a sentence with punctuation)
+            a = s
+            while a >= 2 and s - a < 1600 and _wide_text_unit(data[a - 2] | (data[a - 1] << 8)):
+                a -= 2
+            b = s
+            while b + 1 < n and b - s < 1600 and _wide_text_unit(data[b] | (data[b + 1] << 8)):
+                b += 2
+            if b >= e and (b - a) // 2 >= 12 and sum(1 for k in range(a, b, 2) if data[k + 1] == 0) >= 4:
+                return True
         a = s
         while a > 0 and 0x20 <= data[a - 1] < 0x7F and s - a < 800:
             a -= 1
@@ -1319,16 +1522,25 @@ def plan_strings(eng, data, ok=None):
     inside text runs. Always same length. `ok` replaces the default
     text-run predicate (string_run_ok)."""
     n = len(data)
-    ids = [(r.start, r.end) for r in R.scan_userpaths(data, n)]
-    ids += [(r.start, r.end) for r in R.scan_userpaths_utf16(data, n)]
+    hint = {}            # span -> how its bytes are to be read when the value is replaced as a whole
+    ids = []
+    for r in R.scan_userpaths(data, n):
+        ids.append((r.start, r.end))
+        hint[(r.start, r.end)] = "narrow"
+    for r in R.scan_userpaths_utf16(data, n):
+        ids.append((r.start, r.end))
+        hint[(r.start, r.end)] = "utf-16-le"
     i = data.find(b"**ABCDEFG")
     while i >= 0:
         end = data.find(b"**END_OF_HEADER", i, min(n, i + 8192))
         if end > 0:
             for m in _XT_ID.finditer(data[i:end]):
                 ids.append((i + m.start(1), i + m.end(1)))
+                if m.group(0)[:4] == b"USER":
+                    hint[ids[-1]] = "narrow"
             for m in re.finditer(rb"\bUSER=([^;\r\n]{1,80})\r?\n", data[i:end]):
                 ids.append((i + m.start(1), i + m.end(1)))
+                hint[ids[-1]] = "narrow"
         i = data.find(b"**ABCDEFG", i + 9)
     ids = sorted(set(ids))
     flat = []
@@ -1336,8 +1548,11 @@ def plan_strings(eng, data, ok=None):
         if flat and a < flat[-1][1]:
             continue
         flat.append((a, b))
+    # accounts (user folders, USER fields) are replaced whatever they are;
+    # a SITE field is replaced only through the dictionary
+    forced = [(a, b, hint[(a, b)]) for a, b in flat if (a, b) in hint]
     return eng.plan_bytes(data, flat, ok if ok is not None else string_run_ok(data, n), fixed=True, wide=True,
-                          binary=True, force_ids=_force(flat))
+                          binary=True, force_ids=_force(forced))
 
 
 _ZLB_GUID = bytes.fromhex("231dd571da8148a2a85898b21b89ef99")

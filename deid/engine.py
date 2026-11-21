@@ -64,7 +64,72 @@ _ABSENT = frozenset((
     "unknown", "none", "null", "n a", "na", "nan", "anonymous", "unspecified", "not specified", "tbd", "tba",
     "undefined", "empty", "author", "name", "your name", "user name", "username", "company", "company name",
     "organization", "organisation", "public", "default", "default user", "all users", "defaultuser0", "shared",
-    "desconocido", "unbekannt", "inconnu", "sin nombre"))
+    "desconocido", "unbekannt", "inconnu", "sin nombre",
+    "未指定", "未知", "无", "無", "不明", "不详", "未設定", "未设置", "匿名", "なし", "нет", "неизвестно"))
+
+
+def _alpha_script(u):
+    """Code point of a letter in a script that writes words with spaces
+    between them (accented Latin, Greek, Cyrillic, Armenian)?"""
+    return (0xC0 <= u <= 0x24F or 0x370 <= u <= 0x58F) and chr(u).isalpha()
+
+
+def _wide_letter(orig, i):
+    """Is the UTF-16LE code unit at offset i of the byte view such a letter?"""
+    try:
+        return _alpha_script(ord(orig[i]) | (ord(orig[i + 1]) << 8))
+    except IndexError:
+        return False
+
+
+def _utf8_letter_before(orig, s):
+    """Does a two-byte UTF-8 character that is such a letter end right before s?"""
+    try:
+        b1, b0 = ord(orig[s - 1]), ord(orig[s - 2])
+    except IndexError:
+        return False
+    if 0xC2 <= b0 <= 0xDF and 0x80 <= b1 <= 0xBF:
+        return _alpha_script(((b0 & 0x1F) << 6) | (b1 & 0x3F))
+    return False
+
+
+def _looks_wide(seg):
+    """Is this value UTF-16LE text? Latin text has zero high bytes. Text in
+    another script is recognised by its narrow reading, which would hold
+    control characters (the high byte of Cyrillic is 0x04, of Greek 0x03),
+    while its wide reading is letters, digits and ordinary punctuation."""
+    n = len(seg)
+    if n < 4 or n % 2:
+        return False
+    if not any(seg[1::2]):
+        return all(seg[0::2][:2])
+    if any(c < 0x20 for c in seg):
+        try:
+            t = seg.decode("utf-16-le")
+        except UnicodeDecodeError:
+            return False
+        return all(ch.isalnum() or ch in " ._-'()~" for ch in t.rstrip("\x00"))
+    return False
+
+
+def _decode_value(core):
+    """(text, codec) for the bytes of a narrow field value: UTF-8, else GBK
+    when that reading is ideographs throughout, else the Western code page."""
+    try:
+        return core.decode("utf-8"), "utf-8"
+    except UnicodeDecodeError:
+        pass
+    try:
+        t = core.decode("gbk")
+        if any("\u4e00" <= ch <= "\u9fff" for ch in t) and all(
+                ch < "\u0080" or "\u3000" <= ch <= "\u9fff" or "\uff00" <= ch <= "\uffef" for ch in t):
+            return t, "gbk"
+    except UnicodeDecodeError:
+        pass
+    try:
+        return core.decode("cp1252"), "cp1252"
+    except UnicodeDecodeError:
+        return core.decode("latin-1"), "latin-1"
 
 
 class Entry:
@@ -92,7 +157,8 @@ class Engine:
         # Document scope: identities known to belong to the file being
         # processed (found in its identity fields, its text or its path).
         # They are replaced everywhere in that file, whatever their tier.
-        self.no_protect = False    # True while a file without machine references is processed
+        self.no_protect = False    # True while protected file names are to be ignored
+        self.bare = set()          # protected names that also count without a file extension
         self.extra_groups = frozenset()   # source groups that hold exact copies of the current file
         self.links = dictionary.get("links") or {}   # group -> groups that share files with it
         self.scoped = set()        # eids replaceable in free text of this file
@@ -174,6 +240,11 @@ class Engine:
                 e.nchar = len(e.pseudo)
                 e.groups = None
                 self.entries.append(e)
+                # a name that looks like a part or drawing number (several
+                # words, a digit or a joining character) is the file's name
+                # wherever it is written, with or without an extension
+                if len(stem) >= 8 and len(toks) >= 2 and any(c.isdigit() or c in "_-" for c in stem):
+                    self.bare.add(e.eid)
                 for k, enc in ((norm_text(stem), "x"), (norm_bytes(stem.encode("utf-16-le")), "u16")):
                     if len(k) >= 3 and k not in keys:
                         keys[k] = (e.eid, enc, len(k))
@@ -260,15 +331,23 @@ class Engine:
             if ents[eid].tier == "P":
                 if self.no_protect:
                     continue
-                # a protected file name counts only when an extension follows
+                # a protected file name counts when an extension follows; a
+                # name that looks like a part number also counts on its own,
+                # as a complete word
                 if enc == "u16":
                     if not (bytes_view and view[e:e + 2] == ".\x00" and e + 2 < n and view[e + 2].isalnum()):
-                        continue
+                        if eid not in self.bare or not bytes_view:
+                            continue
+                        if e + 1 < n and view[e + 1] == "\x00" and view[e].isalnum():
+                            continue
                     if s >= 2 and view[s - 1] == "\x00" and view[s - 2].isalnum() and view[s - 2] < "\x80":
                         continue
                 else:
                     if not (view[e:e + 1] == "." and e + 1 < n and view[e + 1].isalnum()):
-                        continue
+                        if eid not in self.bare:
+                            continue
+                        if e < n and view[e].isalnum():
+                            continue
                     if s > 0 and view[s - 1].isalnum():
                         continue
                 out.append((s, e, eid, enc))
@@ -283,6 +362,18 @@ class Engine:
             if enc == "u16":
                 if not bytes_view:
                     continue
+                # a letter of an alphabetic script outside ASCII right next to
+                # the match (Cyrillic, Greek, accented Latin): the match is
+                # part of a longer word
+                # (only when the match itself begins / ends with such a letter:
+                # next to an ASCII name the neighbouring unit may be binary
+                # data; and not when the unit is the length byte of a string
+                # marker FF FE FF <n>)
+                if (s >= 2 and _wide_letter(orig, s) and _wide_letter(orig, s - 2) and not (
+                        s >= 4 and orig[s - 2] == "\xff" and orig[s - 3] == "\xfe" and orig[s - 4] == "\xff")):
+                    continue
+                if e + 1 < n and _wide_letter(orig, e - 2) and _wide_letter(orig, e):
+                    continue
                 loose = ents[eid].nchar >= 5 or eid in self.scoped
                 if s >= 2 and view[s - 1] == "\x00" and view[s - 2].isalnum() and view[s - 2] < "\x80":
                     if not ((loose and self._camel16(orig, s, n)) or self._digit_edge(ents[eid], view, s - 2, s)):
@@ -292,6 +383,12 @@ class Engine:
                         continue
             else:
                 loose = ents[eid].nchar >= 5 or eid in self.scoped
+                # UTF-8 text: the character before the match is a letter of an
+                # alphabetic script outside ASCII (its last byte is not a
+                # letter in the byte view, so the test below cannot see it)
+                if (bytes_view and s >= 2 and orig[s] >= "\xc2" and "\x80" <= orig[s - 1] < "\xc0"
+                        and _utf8_letter_before(orig, s)):
+                    continue
                 # In a binary stream a byte >= 0x80 next to an ASCII name is a
                 # tag or length byte, not a letter: it ends the word.
                 if s > 0 and view[s - 1].isalnum() and not (binary and orig[s - 1] >= "\x80"):
@@ -497,6 +594,18 @@ class Engine:
         new = "".join(out)
         return (new, done) if new != text else (text, [])
 
+    def words_pseudonym(self, text):
+        """Replace every word of a free-form value by its token pseudonym
+        (letters stay letters, digits inside a word stay digits, numbers and
+        punctuation are kept): for descriptive metadata values that are
+        treated as identifying as a whole. Returns the new text."""
+        if not text or len(text) > 2000:
+            return text
+        want = set(t for t in pseudo.tokens_of(text) if any(c.isalpha() for c in t) and len(t) >= 2)
+        if not want or " ".join(pseudo.tokens_of(text)) in _ABSENT:
+            return text
+        return self._pseudonymise_words(text, want)[0]
+
     def number_pseudonym(self, text):
         """Replace every run of two or more digits by its token pseudonym
         (digits stay digits, same length): telephone numbers."""
@@ -686,31 +795,45 @@ class Engine:
         """Account / person fields the dictionary left as they were: replace
         the whole value word by word (see field_pseudonym, force=True)."""
         extra = []
-        for a, b in spans:
+        for sp in spans:
+            a, b = sp[0], sp[1]
+            hint = sp[2] if len(sp) > 2 else None      # the value's codec, or "narrow", when the caller knows
             if b <= a or b - a > 400 or any(s < b and e > a for s, e, _nb in out):
                 continue
             seg = bytes(raw[a:b])
-            wide = len(seg) >= 4 and len(seg) % 2 == 0 and not any(seg[1::2]) and all(seg[0::2][:2])
+            if hint is None:
+                wide = _looks_wide(seg)
+            else:
+                wide = hint == "utf-16-le" and len(seg) % 2 == 0
+                if hint == "utf-16-le" and not wide:
+                    continue
             if wide:
                 core = seg
                 while len(core) >= 2 and core[-2:] == b"\x00\x00":
                     core = core[:-2]
                 codec = "utf-16-le"
-            else:
-                core = seg.rstrip(b"\x00")
-                codec = "utf-8"
-            if not core:
-                continue
-            try:
-                text = core.decode(codec)
-            except UnicodeDecodeError:
-                if wide:
+                if not core:
                     continue
-                codec = "cp1252"
                 try:
                     text = core.decode(codec)
                 except UnicodeDecodeError:
                     continue
+            else:
+                core = seg.rstrip(b"\x00")
+                if not core:
+                    continue
+                if a >= 7 and bytes(raw[a - 6:a]) == b"/home/" and chr(raw[a - 7]).isalnum():
+                    continue              # "site.org/home/about/": a web address, not a home folder
+                text = None
+                if hint and hint not in ("narrow", "utf-8", "ascii", "cp1252", "latin-1"):
+                    try:
+                        text, codec = core.decode(hint), hint       # the code page the container declares
+                    except (UnicodeDecodeError, LookupError):
+                        text = None
+                if text is None:
+                    text, codec = _decode_value(core)
+            if "<" in text or ">" in text or "&" in text or "\ufffd" in text:
+                continue                  # markup or an escaped character: not a plain value
             new, toks = self.field_pseudonym(text, force=True)
             if not toks or new == text:
                 continue

@@ -46,7 +46,7 @@ if [ "$DEID_RENAME" = "all" ]; then
   LIMITS="$HERE/deid/data/limits_paths_renamed.txt"
 else
   # file names stay (at least partly) unchanged: keep references to them intact
-  "$PY" -I "$HERE/deid/protect.py" --dict "$D/dict.json"
+  "$PY" -I "$HERE/deid/protect.py" --dict "$D/dict.json" --scope
   [ -z "$DEID_RENAME" ] || FLAGS+=(--rename "$DEID_RENAME")
 fi
 

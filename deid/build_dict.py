@@ -199,7 +199,7 @@ _NAME_ORG = re.compile(
     r"(?i)(\bcompany|\bazienda|\bfirma\b|\bempresa|soci[eé]t[eé]|entreprise|\bcustomer|\bclient\b|"
     r"\bkunde\b|organi[sz]ation)")
 _NAME_NOT = re.compile(
-    r"(?i)(date|datum|fecha|\bdata\b|\btime\b|\bnum|number|\bno\b|\bcode\b|\brev|status|stamp|"
+    r"(?i)(date|datum|fecha|\bdata\b|\btime\b|\bnum|number|\bno\b|\bcode\b|\brev|status|stamp|\btitle\b|"
     r"\bid\b|version|tool|software|system|applic)")
 
 
@@ -359,6 +359,9 @@ class Builder:
             for t in tokens:
                 if len(t) < 2 or t.isdigit() or t in self.L.struct or t in self.L.generic_tok:
                     continue
+                if any("\u0370" <= c <= "\u058f" for c in t):
+                    continue        # Greek / Cyrillic words: no word lists to tell a name from a
+                    #                 common word, so only the complete value is an identity
                 if cls not in ("PERSON", "ACCOUNT") and (
                         self.L.common(t) or len(t) < 4 or t in self.L.proper or ordinary_word(t, self.L)):
                     continue        # organisation names: only their distinctive words stand alone

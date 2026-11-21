@@ -31,7 +31,7 @@ MAX_DEPTH = 4
 _ENGINE = None
 _TMPROOT = None
 OPTS = {"rename": False, "pdftext": False, "creo": False, "zlb": False, "strings": False, "dwg": False,
-        "pdfextra": False, "dwgobj": False, "scope": False, "nofallback": False}
+        "pdfextra": False, "dwgobj": False, "scope": False, "nofallback": False, "pdfmeta": False}
 TEXT_KINDS = ("step", "iges", "dxf", "svg", "text")
 
 
@@ -446,6 +446,9 @@ def main(argv):
     ap.add_argument("--scope", action="store_true",
                     help="document scope: an identity found in a file's identity fields, text or path is "
                          "replaced everywhere in that file")
+    ap.add_argument("--pdfmeta-all", action="store_true",
+                    help="PDF: pseudonymise every descriptive metadata value word by word (title, subject, "
+                         "keywords, producing software), not only the identity fields")
     ap.add_argument("--dwgobj", action="store_true",
                     help="also edit text inside DWG object data (bit level, per-object CRC kept valid)")
     ap.add_argument("--logos", default=None,
@@ -458,7 +461,7 @@ def main(argv):
                     help="edit text runs (paths, user names) in otherwise unparsed streams of native files")
     args = ap.parse_args(argv)
     opts = {"rename": args.rename, "pdftext": args.pdftext, "creo": args.creo, "zlb": args.zlb,
-            "strings": args.strings, "dwg": args.dwg, "dwgobj": args.dwgobj, "scope": args.scope, "nofallback": args.no_field_fallback, "pdfextra": args.pdfextra,
+            "strings": args.strings, "dwg": args.dwg, "dwgobj": args.dwgobj, "pdfmeta": args.pdfmeta_all, "scope": args.scope, "nofallback": args.no_field_fallback, "pdfextra": args.pdfextra,
             "previews": args.previews, "logos": args.logos}
     os.makedirs(args.out, exist_ok=True)
     tmproot = os.path.join(util.WORK, "tmp")
