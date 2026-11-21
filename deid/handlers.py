@@ -680,7 +680,8 @@ def _pdf_visible_text(eng, src, tmp, notes=None):
     import pymupdf
     from . import pdftext
     skip = set()
-    for _attempt in range(40):
+    simple = set()       # pages whose lines could not be drawn again as a whole
+    for _attempt in range(60):
         total = 0
         failed = None
         doc = pymupdf.open(src)
@@ -690,7 +691,7 @@ def _pdf_visible_text(eng, src, tmp, notes=None):
             for page in doc:
                 if page.number in skip:
                     continue
-                plan = pdftext.page_plan(eng, page)
+                plan = pdftext.page_plan(eng, page, page.number not in simple)
                 if not plan:
                     continue
                 shown = _shown_images(page)
@@ -704,7 +705,12 @@ def _pdf_visible_text(eng, src, tmp, notes=None):
                 total += n
             if failed is not None:
                 # the page object is already modified in memory: start again
-                # from the file and leave that page alone
+                # from the file. A page that lost words when its lines were
+                # drawn again gets one more try with only the matched
+                # characters replaced; otherwise the page is left alone.
+                if failed[0] not in simple and failed[1].startswith("ValueError"):
+                    simple.add(failed[0])
+                    continue
                 skip.add(failed[0])
                 if notes is not None:
                     notes.append("page %d text kept (%s)" % (failed[0] + 1, failed[1]))

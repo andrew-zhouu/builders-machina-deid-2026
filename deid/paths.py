@@ -18,6 +18,9 @@ _HASH = re.compile(r"^[0-9a-f]{7,40}$")
 _VERSION = re.compile(r"(\.\d+)$")
 
 
+_EXTENSION = re.compile(r"^[A-Za-z0-9_~$]{1,12}$")
+
+
 def split_name(base):
     """(stem, extension-with-dot) keeping multi-part CAD extensions intact."""
     m = _VERSION.search(base)
@@ -27,7 +30,10 @@ def split_name(base):
         base = base[:m.start()]
     if "." in base and not base.startswith("."):
         stem, ext = base.rsplit(".", 1)
-        return stem, "." + ext + tail
+        # an extension is short and plain; "GRBL-1.1g-Name-Of-Maker" has a
+        # version number in it, not an extension
+        if _EXTENSION.match(ext):
+            return stem, "." + ext + tail
     return base, tail
 
 

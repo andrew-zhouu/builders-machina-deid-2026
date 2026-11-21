@@ -54,16 +54,16 @@ def _structure(kind, src, dst):
     try:
         if kind == "pdf":
             r = subprocess.run(["qpdf", "--check", dst], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               timeout=300)
+                               timeout=1500)
             if r.returncode not in (0, 3):   # 3 = warnings only
                 r0 = subprocess.run(["qpdf", "--check", src], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                    timeout=300)
+                                    timeout=1500)
                 if r0.returncode in (0, 3):
                     return "qpdf check fails on output only"
             a = subprocess.run(["qpdf", "--show-npages", src], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                               timeout=300).stdout.strip()
+                               timeout=1500).stdout.strip()
             b = subprocess.run(["qpdf", "--show-npages", dst], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                               timeout=300).stdout.strip()
+                               timeout=1500).stdout.strip()
             if a != b:
                 return "page count %r -> %r" % (a, b)
         elif kind == "ole":
