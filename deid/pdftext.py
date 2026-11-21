@@ -112,8 +112,19 @@ def page_plan(eng, page):
                 y1 = max(c[0][3] for c in cs)
                 if x1 - x0 <= 0 or y1 - y0 <= 0:
                     continue
+                # Does the same word go on right after the match ("NAME_part-01",
+                # "name@host")? Then the new text must end exactly where the
+                # old one did, or a reader would see a space inside the word.
+                glued = False
+                if e < len(text) and not text[e].isspace() and e < len(chars):
+                    try:
+                        _a0, a1 = _along(cs[-1][0], direction)
+                        b0, _b1 = _along(chars[e][0], direction)
+                        glued = (b0 - a1) < 0.25 * max(1.0, cs[0][2] or 8.0)
+                    except (IndexError, TypeError):
+                        glued = False
                 plan.append((pymupdf.Rect(x0, y0, x1, y1), cs[0][1], cs[0][2], cs[0][3], direction,
-                             text[s:e], rep, [c[0] for c in cs]))
+                             text[s:e], rep, [c[0] for c in cs], glued))
     return plan
 
 
@@ -153,15 +164,22 @@ def apply_page(page, plan):
         span = math.hypot(rect.width, rect.height) if abs(direction[0]) < 0.99 and abs(direction[1]) < 0.99 \
             else (rect.width if abs(direction[0]) >= 0.99 else rect.height)
         fs = size
-        # keep a little air after the new word: text drawn right up to the
-        # next word would be read together with it
-        if width > span * 0.97 and width > 0:
-            fs = max(2.0, size * span * 0.97 / width)
+        glued = len(item) > 8 and item[8]
         pt = pymupdf.Point(origin)
-        morph = None
+        mat = None
+        if glued and width > 0 and 0.55 <= span / width <= 1.8:
+            # the word goes on behind the match: stretch or squeeze the new
+            # text sideways so that it fills the old place exactly
+            mat = pymupdf.Matrix(span / width, 1.0)
+        elif width > span * 0.97 and width > 0:
+            # keep a little air after the new word: text drawn right up to the
+            # next word would be read together with it
+            fs = max(2.0, size * span * 0.97 / width)
         if abs(direction[0] - 1.0) > 1e-3 or abs(direction[1]) > 1e-3:
             ang = math.degrees(math.atan2(-direction[1], direction[0]))
-            morph = (pt, pymupdf.Matrix(ang))
+            rot = pymupdf.Matrix(ang)
+            mat = rot if mat is None else mat * rot
+        morph = (pt, mat) if mat is not None else None
         page.insert_text(pt, new, fontname=font, fontsize=fs, color=_rgb(color), morph=morph)
     after = _words(page)
     # every word that was not part of a replacement must survive

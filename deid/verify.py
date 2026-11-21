@@ -38,6 +38,17 @@ def _init(dict_path, key_path, tmproot, out_root, opts=None):
     _OUT = out_root
 
 
+def _zip_raw(path, zi):
+    """Stored (compressed, possibly encrypted) bytes of one archive member."""
+    import struct
+    with open(path, "rb") as fh:
+        fh.seek(zi.header_offset)
+        head = fh.read(30)
+        n, m = struct.unpack("<HH", head[26:30])
+        fh.seek(zi.header_offset + 30 + n + m)
+        return fh.read(zi.compress_size)
+
+
 def _structure(kind, src, dst):
     """Independent structural comparison; returns error string or None."""
     try:
@@ -87,6 +98,19 @@ def _structure(kind, src, dst):
                         return "zip crc"
                 except NotImplementedError:
                     pass        # members stored with a method Python cannot read (copied verbatim)
+                except RuntimeError:
+                    # password-protected members cannot be decrypted here. They
+                    # are copied verbatim (only their names change), so their
+                    # directory entries and stored bytes must equal the input's.
+                    for x, y in zip(a.infolist(), b.infolist()):
+                        if (x.flag_bits & 1) != (y.flag_bits & 1):
+                            return "zip encryption flag differs"
+                        if x.flag_bits & 1:
+                            if (x.CRC, x.compress_size, x.file_size, x.compress_type) != (
+                                    y.CRC, y.compress_size, y.file_size, y.compress_type):
+                                return "zip encrypted member differs"
+                            if _zip_raw(src, x) != _zip_raw(dst, y):
+                                return "zip encrypted member data differs"
         elif kind in ("step", "iges", "dxf", "svg", "text", "stl"):
             sa, sb = os.path.getsize(src), os.path.getsize(dst)
             if kind in ("iges", "stl") and sa != sb:
@@ -143,6 +167,9 @@ def main(argv):
     ap.add_argument("--pdfextra", action="store_true")
     ap.add_argument("--previews", action="store_true")
     ap.add_argument("--logos", default=None)
+    ap.add_argument("--kinds", default=None,
+                    help="re-check only changed files of these kinds (comma separated), e.g. after "
+                         "re-processing one kind of file in an already verified corpus")
     args = ap.parse_args(argv)
     opts = {"rename": args.rename, "pdftext": args.pdftext, "creo": args.creo, "zlb": args.zlb,
             "strings": args.strings, "dwg": args.dwg, "dwgobj": args.dwgobj, "pdfmeta": args.pdfmeta_all, "scope": args.scope, "nofallback": True, "pdfextra": args.pdfextra,
@@ -191,6 +218,9 @@ def main(argv):
         bad += 1
     changed = [(rel, r["k"], omap[rel]) for rel, r in recs.items()
                if r["c"] and rel in inputs and omap[rel] in outputs]
+    if args.kinds:
+        kinds = set(args.kinds.split(","))
+        changed = [c for c in changed if c[1] in kinds]
     print("re-checking %d changed files ..." % len(changed))
     tmproot = os.path.join(util.WORK, "tmp")
     os.makedirs(tmproot, exist_ok=True)

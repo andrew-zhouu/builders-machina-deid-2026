@@ -457,6 +457,27 @@ _EMAIL_ANY = re.compile(r"(?<![A-Za-z0-9._%+-])([A-Za-z0-9._%+-]{1,64})\s?@\s?([
 _PHONE_LABELLED = re.compile(
     r"(?i)\b(?:tel|telephone|phone|fax|mobile|mob|cell|t[ée]l[ée]phone|t[ée]l|telefon|tel[ée]fono|telefono|手机|电话)"
     r"\b\.?\s*[:：.]?\s*(\+?[\d(][\d\s().\-/]{6,22}\d)")
+# "Drawn by: N. Surname", "Checked by: First Last": a person named after a
+# title-block label on the same line. The colon is required, and the value
+# must look like a name (initials and a surname, or two capitalised words).
+_NAME_LABELLED = re.compile(
+    r"(?i)\b(?:drawn|designed|design|checked|approved|verified|released|reviewed|created|prepared|modell?ed|"
+    r"dessin[ée]|v[ée]rifi[ée]|gezeichnet|gepr[üu]ft|bearbeitet|erstellt|dibujado|dise[ñn]ado|revisado|"
+    r"aprobado|disegnato|controllato)"
+    r"(?:\s*/\s*[A-Za-z]+)?(?:\s+(?:by|par|von|durch|por|da))?\s*[:：]\s*"
+    r"((?-i:(?:[A-Z]\.\s?){1,2}[A-Z][a-zà-ÿ]+(?:-[A-Z][a-zà-ÿ]+)?"
+    r"|[A-Z][a-zà-ÿ]+(?:\s+[A-Z]\.)?\s+[A-Z][a-zà-ÿ]+(?:-[A-Z][a-zà-ÿ]+)?))")
+# Ownership and copyright notices name the organisation behind a drawing:
+# "PROPERTY OF <organisation>; ANY REPRODUCTION ...", "WRITTEN PERMISSION OF
+# <organisation> IS PROHIBITED", "Copyright (c) 2021 <organisation>".
+_ORG_NOTICE = re.compile(
+    r"(?i)(?:\b(?:property|propiedad|propri[ée]t[ée]|permission|consent|autorizaci[óo]n|autoritzaci[óo])\s+"
+    r"(?:of|de(?:\s+la)?|del)|\bcopyright(?:\s*\(c\)|\s*©)?(?:\s*\d{4}(?:\s*-\s*\d{4})?)?(?:\s*,)?(?:\s+by)?"
+    r"|©(?:\s*\d{4}(?:\s*-\s*\d{4})?)?(?:\s+by)?)\s+"
+    r"([A-Za-zÀ-ÿ0-9][^;,\n]{1,70}?)"
+    r"(?=\s*(?:[;,(]|\.\s|\.$|$)|\s+(?:any|is|are|and|all\s+rights|without|reserved|\d{4})\b)")
+_LEGAL_FORM = re.compile(r"(?i)(?:\b(?:s\.?l\.?u?|s\.?a\.?|inc|ltd|llc|gmbh|corp|co|plc|b\.?v|a\.?g|e\.?v|p\.?a|oy|ab|srl|s\.?r\.?l|"
+                         r"s\.?p\.?a|pty|kg|ug|sas|sarl)\.?)\s*$")
 _WORDLISTS = []
 
 
@@ -475,12 +496,73 @@ def contact_spans(eng, text, taken=()):
     (start, end, replacement) spans that do not overlap `taken`."""
     from .build_dict import registrable
     out = []
-    if "@" not in text and not _PHONE_LABELLED.search(text):
+    named = _NAME_LABELLED.search(text) if ":" in text or "：" in text else None
+    low = text.lower()
+    notice = ("propert" in low or "propie" in low or "propri" in low or "permission" in low or "consent" in low
+              or "autori" in low or "copyright" in low or "©" in text)
+    if "@" not in text and not named and not notice and not _PHONE_LABELLED.search(text):
         return out
     L = _lists()
 
     def free(a, b):
         return all(e <= a or s >= b for s, e in taken)
+
+    if notice:
+        for m in _ORG_NOTICE.finditer(text):
+            a, b = m.span(1)
+            val = m.group(1).rstrip(" .")
+            b = a + len(val)
+            toks = pseudo_tokens(val)
+            if not toks or len(toks) > 7 or "<" in val or ">" in val:
+                continue
+            words = [t for t in toks if len(t) >= 2 and any(c.isalpha() for c in t)]
+            if not words or "".join(toks) in eng.generic or " ".join(toks) in ("insert company name here",
+                                                                                "company name", "your company"):
+                continue
+            if L.is_vendor(toks) or all(t in eng.keeptok or t in eng.struct for t in words):
+                continue              # catalogue vendors and software keep their names
+            legal = _LEGAL_FORM.search(val)
+            names = [t for t in words if t not in eng.struct and (t in eng.proper or t not in eng.common)]
+            if not legal and not names:
+                continue              # ordinary words only ("the author", "notice added")
+            want = set(t for t in words if t not in eng.struct)
+            if not want:
+                continue
+            if free(a, b):
+                new, done = eng._pseudonymise_words(val, want)
+                if done and new != val:
+                    out.append((a, b, new))
+            else:
+                # the dictionary took part of the name: the remaining words one by one
+                for w in re.finditer(r"[^\s.,]+", val):
+                    wa, wb = a + w.start(), a + w.end()
+                    wt = pseudo_tokens(w.group(0))
+                    if free(wa, wb) and wt and all(t in want for t in wt):
+                        wn, wd = eng._pseudonymise_words(w.group(0), set(wt))
+                        if wd and wn != w.group(0):
+                            out.append((wa, wb, wn))
+
+    if named:
+        for m in _NAME_LABELLED.finditer(text):
+            a, b = m.span(1)
+            # the dictionary may have replaced part of the name already: the
+            # rest gets its token pseudonyms word by word
+            new, toks = eng.field_pseudonym(m.group(1))
+            if not toks:
+                continue                  # a placeholder, a product, ordinary words
+            new, toks = eng.field_pseudonym(m.group(1), force=True)
+            if not toks or new == m.group(1):
+                continue
+            if free(a, b):
+                out.append((a, b, new))
+            else:
+                # word by word around what is taken
+                for w in re.finditer(r"[^\s.]+", m.group(1)):
+                    wa, wb = a + w.start(), a + w.end()
+                    if free(wa, wb):
+                        wn, wt = eng.field_pseudonym(w.group(0), force=True)
+                        if wt and wn != w.group(0):
+                            out.append((wa, wb, wn))
 
     for m in _EMAIL_ANY.finditer(text):
         dom = m.group(2)
@@ -775,6 +857,26 @@ def _h_pdf_scoped(eng, src, dst, name):
     return ch, info
 
 
+def _pdf_pages_differ(src, dst):
+    """(pages in dst, pages in src) when the two differ for a reader that is
+    independent of the library that wrote dst; None when they agree or the
+    source cannot be read at all."""
+    import pymupdf
+    try:
+        a = pymupdf.open(src)
+        na = a.page_count
+        a.close()
+    except Exception:
+        return None
+    try:
+        b = pymupdf.open(dst)
+        nb = b.page_count
+        b.close()
+    except Exception:
+        return ("no", na)
+    return (nb, na) if na != nb else None
+
+
 def _h_pdf_once(eng, src, dst, name):
     import pikepdf
     n = 0
@@ -809,6 +911,17 @@ def _h_pdf_once(eng, src, dst, name):
             except OSError:
                 pass
             ch, info = _pdf_meta(eng, orig_src, dst, name, 0, orig_src)
+        if ch:
+            # last word of an independent reader: a damaged source can lose
+            # pages when it is written out again, whatever was edited
+            bad = _pdf_pages_differ(orig_src, dst)
+            if bad:
+                try:
+                    os.unlink(dst)
+                except OSError:
+                    pass
+                return False, {"pdfnote": "file kept as it is (written again it would have %s pages instead of %s: "
+                                          "damaged source)" % bad}
         if notes:
             info = dict(info)
             info["pdfnote"] = "; ".join(notes[:6])
