@@ -1,0 +1,239 @@
+# CAD/CAM/office software, kernels and tool vendors. These appear in
+# "originating system" style fields and are engineering information, not
+# identities. One per line; matched after canonicalisation.
+solidworks
+solid works
+solidworks corporation
+solidworks corp
+dassault
+dassault systemes
+dassault systemes solidworks corporation
+dassault systemes solidworks corp
+catia
+delmia
+enovia
+3dexperience
+autodesk
+autodesk inc
+inventor
+autodesk inventor
+autocad
+fusion
+fusion 360
+fusion360
+revit
+3ds max
+siemens
+siemens plm
+siemens plm software
+siemens product lifecycle management software inc
+nx
+unigraphics
+ugs
+solid edge
+solidedge
+parasolid
+ptc
+parametric technology corporation
+creo
+creo parametric
+pro engineer
+proengineer
+pro e
+wildfire
+onshape
+freecad
+freecad model
+open cascade
+opencascade
+open cascade technology
+open cascade shape model
+occ
+occt
+kicad
+kicad stepup
+stepup
+pcbnew
+eeschema
+eagle
+altium
+cadquery
+openscad
+blender
+rhino
+rhinoceros
+sketchup
+tinkercad
+spaceclaim
+ansys
+comsol
+matlab
+st-developer
+st developer
+step tools
+steptools
+step tools inc
+spatial
+spatial corp
+spatial corporation
+spatial technology
+acis
+ezdxf
+librecad
+qcad
+inkscape
+sodipodi
+illustrator
+adobe
+adobe systems
+adobe systems incorporated
+acrobat
+distiller
+photoshop
+word
+excel
+powerpoint
+ghostscript
+pdflib
+itext
+cairo
+quartz
+skia
+chrome
+chromium
+firefox
+latex
+pdftex
+tex
+bullzip
+cutepdf
+pdfcreator
+foxit
+nitro
+primopdf
+graphviz
+doxygen
+meshlab
+netfabb
+open3d
+trimesh
+lib3mf
+cura
+prusaslicer
+slic3r
+simplify3d
+mastercam
+hypermill
+gibbscam
+edgecam
+esprit
+vectric
+cadkey
+keycreator
+turbocad
+bricscad
+draftsight
+ironcad
+alibre
+geomagic
+zw3d
+zwcad
+caxa
+ideas
+i-deas
+sdrc
+medusa
+microstation
+bentley
+intergraph
+datakit
+elysium
+coretechnologie
+tech soft 3d
+hoops
+opennurbs
+teigha
+open design alliance
+oda
+gmsh
+salome
+paraview
+vtk
+cgal
+python
+numpy
+java
+linux
+ubuntu
+debian
+windows nt
+macos
+mac os x
+android
+arduino
+raspberry pi
+swstep
+i7cad
+pythonocc
+build123d
+jscad
+zoo
+kittycad
+vcad
+traceparts
+traceparts s a
+cadenas
+partcommunity
+partsolutions
+3d contentcentral
+matplotlib
+gimp
+the gimp
+imageready
+adobe imageready
+bambustudio
+bambu studio
+orcaslicer
+cadquery 3mf exporter
+pscript5 dll
+ashampoo
+ashampoo pdf free
+infix pro
+pdf xchange
+any dwg to pdf converter
+hsmworks
+altium designer
+easyeda
+snapeda
+ultra librarian
+samacsys
+component search engine
+library loader
+terraform
+managed by terraform
+expresstools
+express tools
+camscanner
+huggingface
+zwsoft
+cadsoft
+solidtrans
+smartcad
+benchcad
+partstream
+technodat
+alldatasheet
+yahoogroups
+unix
+sunos
+solaris
+irix
+hpux
+aix
+msdos
+lwip
+mbed
+freertos
+cmsis
+stm32
+esp32

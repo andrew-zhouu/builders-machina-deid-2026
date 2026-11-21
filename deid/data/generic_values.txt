@@ -1,0 +1,349 @@
+# Values that do not identify anyone (placeholders, roles, default account
+# names, hardware brands used as default user names). One per line; matched
+# after canonicalisation (lower case, letters and digits only).
+unknown
+unspecified
+undefined
+not specified
+none
+null
+n/a
+na
+nn
+tbd
+tba
+anonymous
+anon
+nobody
+default
+default user
+defaultuser
+author
+authors
+title
+subject
+name
+names
+user
+user name
+username
+users
+user1
+user01
+usuario
+utilisateur
+benutzer
+utente
+gebruiker
+kullanici
+yonetici
+administrator
+administrador
+administrateur
+administrator1
+admin
+admin1
+sysadmin
+sys admin
+adminforworker
+workeradm
+root
+owner
+propietario
+besitzer
+guest
+invitado
+public
+all users
+shared
+student
+students
+estudiante
+alumno
+etudiant
+schueler
+teacher
+professor
+operator
+engineer
+designer
+drafter
+checker
+manager
+company
+company name
+your company
+your company name
+my company
+mycompany
+organization
+organisation
+organization name
+organization id
+organization description
+person
+person id
+person last name
+person first name
+home
+personal
+private
+test
+tester
+temp
+tmp
+demo
+sample
+example
+dev
+developer
+pc
+pc1
+pc01
+pc001
+computer
+desktop
+laptop
+notebook
+workstation
+windows
+windows user
+windows7
+windows10
+win
+win7
+win10
+microsoft
+microsoft corporation
+hewlett packard
+hewlett-packard
+hp
+dell
+lenovo
+acer
+asus
+msi
+intel
+apple
+mac
+macbook
+toshiba
+samsung
+sony
+ibm
+compaq
+gateway
+thinkpad
+surface
+service
+system
+local
+localhost
+unknown user
+new user
+cad
+cadcam
+caduser
+cad user
+engineering
+design
+drawing
+office
+lab
+shop
+production
+mechanical
+electrical
+group
+staff
+team
+id
+identifier
+identification
+unbekannt
+desconocido
+inconnu
+sconosciuto
+anonymus
+me
+myself
+self
+utilizador
+usuario1
+portable
+mobile
+server
+client
+master
+main
+general
+standard
+normal
+free
+trial
+licensed user
+registered user
+valued customer
+valued acer customer
+preferred customer
+customer
+kunde
+anwender
+未指定
+未
+微软用户
+微软中国
+用户
+管理员
+作者
+未知
+info
+support
+sales
+contact
+licensing
+webmaster
+noreply
+no-reply
+no reply
+help
+mail
+email
+your email
+your.email
+hello
+postmaster
+abuse
+hostmaster
+marketing
+press
+jobs
+careers
+orders
+billing
+accounts
+enquiries
+inquiries
+feedback
+privacy
+security
+legal
+standard
+custom
+estandar
+predeterminado
+workstation
+usuario10
+您的姓名
+姓名
+名称
+公司
+公司名称
+您的公司
+creator org name
+owner org name
+approvedby org name
+classofficer org name
+supplier org name
+security approvedby org name
+definition approvedby org name
+def creator org name
+org name
+last name
+first name
+builduser
+build user
+buildusergroup
+buildusergr
+datasheet
+drawing number
+kontakt
+abteilung
+professur
+uporabnik
+youruser
+your user
+psadmin
+pdmwadmin
+techsupport
+tech support
+sitemonitor
+partserver
+photonuser
+bnsfuser
+konstrukteur
+authorisation
+authorization
+erimental
+шаблоны
+общие
+все пользователи
+пользователь
+администратор
+öffentlich
+offentlich
+público
+publico
+todos los usuarios
+tous les utilisateurs
+alle benutzer
+default user
+etude
+étude
+estudio
+estudo
+studie
+studio
+study
+escritorio
+escrit~1
+docume~1
+deskto~1
+mydocu~1
+misdoc~1
+mesdoc~1
+eigene~1
+progra~1
+downlo~1
+descar~1
+onedri~1
+dropbo~1
+google~1
+appdat~1
+micros~1
+window~1
+bureau~1
+schrei~1
+customerservice
+customer-service
+customer service
+international-sales
+national-sales
+techsupp
+purchasing
+market
+marketing
+service
+services
+mass kg
+prouser
+pro user
+creo user
+cad admin
+cadadmin
+chinasales
+cschina
+finlandsales
+francesales
+germanysales
+italysales
+japansales
+singaporesales
+spainsales
+swedensales
+taiwansales
+thailandsales
+uksales
+usasales
+ft support
+solidworks education

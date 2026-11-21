@@ -1,0 +1,27 @@
+# Technical tokens that must never be replaced as stand-alone words, even if
+# some metadata field happens to contain them. (Ordinary English words are
+# protected separately through the word list.)
+iso din ansi asme astm jis bsi sae aisi ieee iec nema npt nptf bsp bspp bspt unc unf unef metric imperial
+abs pla petg pom ptfe hdpe ldpe pvc pmma peek nylon delrin acetal inconel hastelloy titanium kevlar
+mm cm inch inches kg nm rpm psi mpa gpa khz mhz deg rad
+sldprt sldasm slddrw ipt iam idw ipn dwg dxf step stp iges igs stl brep nurbs obj amf wrl vrml pdf svg png jpg
+bom pcb pcba cnc cam fea cfd gdt rev qty ref typ thk dia max min nom tol assy asm prt drw config
+default sheet view detail section scale sketch extrude revolve fillet chamfer pad pocket origin plane axis
+body part parts assembly drawing model models nema17 nema23 arduino stepper servo bearing
+left right top bottom front back rear upper lower inner outer base cover plate bracket mount holder
+housing shaft gear pulley belt screw bolt nut washer spring pin rod tube pipe frame panel
+m2 m3 m4 m5 m6 m8 m10 m12 m16 m20 x1 x2 y1 y2 z1 z2 v1 v2 v3 v4 v5
+mcad ecad mech elec proto prototype final draft released obsolete
+generic misc miscellaneous various other common library libraries standard standards
+datasheet datasheets schematic schematics footprint footprints pinout gerber gerbers silkscreen
+toolpath toolpaths workpiece fixture fixtures flange flanges gasket gaskets manifold coolant
+subassembly subassemblies weldment weldments countersink counterbore chamfers fillets
+allen phillips torx morse bowden cardan stirling venturi pitot vernier bourdon geneva oldham euler bezier
+mohr rockwell brinell vickers charpy poisson reynolds mach fresnel peltier zener schottky darlington
+wheatstone kapton teflon hooke coriolis laplace fourier gaussian cartesian boolean hermite lagrange
+weibull acme whitworth woodruff belleville nyloc helicoil viton buna nitrile lexan plexiglas plexiglass
+bakelite invar kovar monel nichrome zamak hardox nitinol macor zerodur vespel torlon ultem garolite kynar
+tygon mylar nomex tyvek dyneema velcro delrin
+rackmount trapezium mechatronics biorobotics photonics nanotech infotech robotique robotics
+konstruktionslehre normelemente manutencao engenharia arquitetos reprap reprappro mindstorm mindstorms
+openhardware opensource hardware firmware software mechanical electrical pneumatic hydraulic

@@ -1,0 +1,17 @@
+# Month and weekday names (several languages) and AM/PM: date fragments, never identities.
+january february march april may june july august september october november december
+jan feb mar apr jun jul aug sep sept oct nov dec
+monday tuesday wednesday thursday friday saturday sunday mon tue tues wed thu thur thurs fri sat sun
+janvier fevrier mars avril mai juin juillet aout septembre octobre novembre decembre
+lundi mardi mercredi jeudi vendredi samedi dimanche
+januar februar marz maerz mai juni juli oktober dezember
+montag dienstag mittwoch donnerstag freitag samstag sonntag
+enero febrero marzo abril mayo junio julio agosto septiembre setiembre octubre noviembre diciembre
+lunes martes miercoles jueves viernes sabado domingo
+gennaio febbraio aprile maggio giugno luglio settembre ottobre dicembre
+lunedi martedi mercoledi giovedi venerdi sabato domenica
+janeiro fevereiro marco junho julho setembro outubro novembro dezembro
+segunda terca quarta quinta sexta
+januari februari maart mei augustus
+maandag dinsdag woensdag donderdag vrijdag zaterdag zondag
+am pm utc gmt cet cest est edt pst pdt

@@ -1,0 +1,30 @@
+LIMITATIONS IN THIS ATTEMPT
+---------------------------
+* File and folder names are unchanged in this build (a renamed variant is
+  produced from it with code/deid/retree.py or with transform.py --rename).
+  A file name that contains an identity is left as it is wherever another
+  file refers to it (name followed by its extension), so references resolve.
+* PDF: document metadata, bookmarks, annotation authors and visible page text
+  that is stored as text are pseudonymised (text is redacted and redrawn at
+  the same place with a standard font); small images that repeat across the
+  drawings of a project (logos) are replaced by a neutral grey picture of the
+  same size; page thumbnails of edited documents are dropped. Text rendered
+  as vector outlines or scanned images, and vector logos, are not edited.
+* Native CAD: property sets, serialized strings, user-name path components,
+  compressed sub-streams of pre-2015 SolidWorks files, Creo revision records,
+  embedded Parasolid headers and the metadata sections of DWG R2004+ files
+  (summary information, application history, file dependency list) are
+  edited in place (same size). Sheet previews embedded in SolidWorks drawings
+  are coarsened so that no text is legible. Not parsed and passed through
+  unchanged: text entities inside DWG object data, DWG R2000 and older,
+  CATIA V5, JT, NX, U3D; previews of other drawing formats.
+* Images: pixels are never changed. EXIF / XMP text tags are pseudonymised
+  and GPS position data is emptied.
+* RAR archives cannot be re-created with free tools; they are passed through.
+* Part numbers and project codes are replaced only where they coincide with a
+  harvested identity. Catalogue-part vendors keep their names in free text
+  and bills of material.
+* Identities were collected from metadata fields, from repeated title-block
+  text of the drawings (code/deid/pdfharvest.py, textharvest.py), from
+  repository names, and from a short reviewed list
+  (code/deid/data/curated_identities.tsv).

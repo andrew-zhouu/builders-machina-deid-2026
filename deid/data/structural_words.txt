@@ -1,0 +1,12 @@
+# Words kept unchanged inside a multi-word identity ("University of X",
+# "X GmbH", "DESKTOP-xxxx"): they carry no identity themselves.
+of the and for de del la le les du des der die das von van den di da do dos y e et und a an in at on to by
+university universitat universidad universite universita universiteit college institute institut instituto
+school academy faculty department dept laboratory laboratories lab labs center centre national international
+inc ltd llc gmbh co corp corporation company ag sa srl spa bv kg plc pty limited sas sarl oy ab as aps nv
+technologies technology tech systems system engineering engineers robotics research group team foundation
+society association project projects design designs solutions industries industrial electronics mechanical
+manufacturing products services studio workshop
+desktop laptop pc win windows workstation notebook server cad
+mr mrs ms dr prof ing eng dipl phd jr sr ii iii
+com net org edu gov mil io uk fr it es nl ch be se no dk fi pl cz ru cn jp kr au ca us eu info biz

@@ -1,0 +1,4 @@
+# scope (path prefix)	class	name   - example entries, replace with reviewed identities of your corpus
+sources/catalog/Example University test rig	ORG	Example University
+sources/existing/	PERSON	Jane Doe
+sources/web/	DOMAIN	downloads.example.org

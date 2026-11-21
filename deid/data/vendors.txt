@@ -1,0 +1,266 @@
+# Catalogue-part vendors and component manufacturers. Their names on bought-in
+# standard parts are engineering/BOM information, so they are never replaced
+# in free text; inside identity fields (author, company) they still receive a
+# pseudonym. One name per line; matched after canonicalisation.
+mcmaster
+mcmaster carr
+mcmaster-carr supply company
+mcmastercarr
+misumi
+thorlabs
+edmund optics
+newport
+festo
+smc
+bosch
+bosch rexroth
+rexroth
+igus
+skf
+nsk
+thk
+hiwin
+ina
+fag
+schaeffler
+omron
+schneider
+schneider electric
+abb
+rittal
+phoenix contact
+wago
+weidmuller
+te connectivity
+tyco
+tyco electronics
+molex
+amphenol
+jst
+hirose
+samtec
+harting
+lemo
+digikey
+digi key
+mouser
+farnell
+rs components
+rs pro
+newark
+arrow
+texas instruments
+analog devices
+stmicroelectronics
+nxp
+microchip
+atmel
+infineon
+vishay
+bourns
+murata
+tdk
+kemet
+yageo
+panasonic
+maxon
+maxon motor
+faulhaber
+nanotec
+oriental motor
+leadshine
+trinamic
+dynamixel
+robotis
+adafruit
+adafruit industries
+sparkfun
+pololu
+seeed
+seeed studio
+dfrobot
+openbuilds
+8020
+80 20 inc
+item
+item industrietechnik
+item industrietechnik gmbh
+norelem
+ganter
+elesa
+kipp
+halder
+haas
+dmg mori
+sandvik
+kennametal
+hasco
+dme
+meusburger
+strack
+parker
+parker hannifin
+swagelok
+legris
+camozzi
+norgren
+aventics
+burkert
+keyence
+sick
+balluff
+ifm
+pepperl fuchs
+banner
+cognex
+basler
+flir
+zeiss
+leica
+olympus
+nikon
+mitutoyo
+renishaw
+heidenhain
+fanuc
+kuka
+yaskawa
+universal robots
+staubli
+schunk
+zimmer
+robotiq
+onrobot
+3m
+loctite
+henkel
+dupont
+georg fischer
+georg fischer piping systems
+eaton
+eaton electric
+rockwell automation
+allen bradley
+honeywell
+emerson
+danfoss
+grundfos
+lenze
+sew eurodrive
+nord
+bonfiglioli
+harmonic drive
+nabtesco
+gates
+optibelt
+continental
+habasit
+bishop wisecarver
+pbc linear
+thomson
+thomson linear
+nook
+kollmorgen
+moog
+beckhoff
+pilz
+turck
+lapp
+helukabel
+hellermanntyton
+panduit
+fischer
+fischer elektronik
+bopla
+hammond
+hammond manufacturing
+fibox
+rose
+spelsberg
+nkk switches
+nkkswitches
+e switch
+c k
+alps
+alps alpine
+cui
+cui devices
+tracopower
+traco
+mean well
+meanwell
+recom
+wurth
+wurth elektronik
+we online
+coilcraft
+abracon
+ecs
+epson
+kyocera
+avx
+nichicon
+rubycon
+littelfuse
+bel fuse
+schurter
+bulgin
+neutrik
+switchcraft
+kycon
+cnc tech
+on shore
+tag connect
+keystone
+keystone electronics
+mill max
+harwin
+preci dip
+3d systems
+stratasys
+ultimaker
+prusa
+prusa research
+creality
+bambu lab
+e3d
+slice engineering
+ldo
+ldo motors
+stepperonline
+stepper online
+servocity
+gobilda
+actobotics
+vex
+vex robotics
+rev robotics
+andymark
+lego
+fischertechnik
+makeblock
+tetrix
+broadcom
+keysight
+nexperia
+lattice
+latticesemi
+hamamatsu
+hamamatsu photonics
+optotune
+rochling
+startech
+motedis
+sherline
+seemecnc
+orangepi
+orange pi
+bitcraze
+antmicro
+openbuilds
+inventables
+shapeoko
+carbide 3d
+sienci
+sienci labs
+elphel

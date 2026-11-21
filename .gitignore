@@ -1,0 +1,22 @@
+# never publish: corpus data, outputs, private state
+/input/
+/out/
+/work/
+*.key
+dict.json
+protect.json
+demote.json
+*.jsonl
+*.log
+upload_token*
+# corpus-specific reviewed lists (contain original identifiers)
+deid/data/curated_identities.tsv
+deid/data/text_exclude.txt
+deid/data/repo_exclude.txt
+# generated vocabulary lists (tools/build_wordlists.sh)
+deid/data/words_*.txt
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/

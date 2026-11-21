@@ -1,0 +1,26 @@
+# Registrable domains that are infrastructure, standards bodies, software
+# vendors or mass e-mail providers. They are format-required keys (XML
+# namespaces, licence URLs) or carry no identity, and are never replaced.
+w3.org purl.org adobe.com creativecommons.org github.com github.io gitlab.com bitbucket.org
+githubusercontent.com wikipedia.org wikimedia.org gnu.org microsoft.com openxmlformats.org inkscape.org
+sourceforge.net freecadweb.org freecad.org kicad.org kicad-pcb.org steptools.com spatial.com
+opencascade.org opencascade.com autodesk.com solidworks.com 3ds.com ptc.com siemens.com google.com
+googleapis.com youtube.com youtu.be gmail.com googlemail.com yahoo.com hotmail.com outlook.com live.com
+qq.com 163.com 126.com icloud.com protonmail.com example.com example.org example.net openstreetmap.org
+osm.org mozilla.org apache.org opensource.org python.org jsdelivr.net cloudflare.com schema.org
+xmlsoap.org oasis-open.org iso.org aiim.org npes.org color.org dublincore.org xfa.org pdfa.org
+doxygen.nl doxygen.org graphviz.org blender.org meshlab.net netfabb.com sodipodi.org
+web.archive.org archive.org stackoverflow.com python.org npmjs.com pypi.org readthedocs.io
+dev.opencascade.org cadquery.org openscad.org onshape.com grabcad.com thingiverse.com printables.com
+apple.com mit.edu.license spdx.org unlicense.org wtfpl.net fsf.org
+dropbox.com drive.google.com docs.google.com bit.ly goo.gl t.co tinyurl.com
+facebook.com twitter.com x.com instagram.com linkedin.com reddit.com discord.gg discord.com
+matplotlib.org netbeans.org junit.org oracle.com digicert.com mbed.org iptc.org ietf.org iana.org
+json.org osgi.org jedec.org hsmworks.com bambulab.com shopify.com dropbox.com episerver.net
+cloudfront.net amazonaws.com googleusercontent.com windows.net azurewebsites.net sharepoint.com
+snapeda.com componentsearchengine.com samacsys.com ultralibrarian.com traceparts.com cadenas.de
+partcommunity.com 3dcontentcentral.com naturalearthdata.com protomaps.com gimp.org
+gmx.de gmx.net gmx.com web.de t-online.de mail.ru yandex.ru yandex.com aol.com msn.com me.com mac.com
+free.fr orange.fr wanadoo.fr laposte.net libero.it sina.com foxmail.com naver.com iki.fi acm.org ieee.org
+ymail.com rocketmail.com hotmail.co.uk hotmail.fr hotmail.de yahoo.co.uk yahoo.fr yahoo.de live.cn
+users.noreply.github.com users.sourceforge.net
