@@ -238,7 +238,7 @@ class Engine:
     @staticmethod
     def _digit_edge(ent, view, outside, inside):
         """A name of four or more characters that ends (or starts) with a
-        letter and is followed (or preceded) by a digit: "ICUB2", "A3ACME".
+        letter and is followed (or preceded) by a digit: "ACME2", "A3ACME".
         The digit is a version or code written against the name, so the name
         still counts as a word of its own."""
         return (ent.nchar >= 4 and "0" <= view[outside] <= "9" and view[inside].isalpha()
@@ -382,7 +382,7 @@ class Engine:
             self.scoped.add(eid)
             for tok, keep in zip(ent.tokens, ent.keep):
                 if keep or len(tok) < 4 or tok.isdigit():
-                    continue            # short parts ("iit" of "icub-tech-iit") are too ambiguous alone
+                    continue            # short parts ("lab" of "acme-robo-lab") are too ambiguous alone
                 sid = self.single.get(tok)
                 if sid is None:
                     sid = self._virtual(tok)
@@ -520,7 +520,7 @@ class Engine:
 
     def _virtual(self, tok, force=False):
         """Entry for one word of a longer name that has no entry of its own
-        ("chemnitz" of "TU Chemnitz"). It exists only for document scope: it
+        ("smith" of "Smith Robotics"). It exists only for document scope: it
         is never matched unless its name is in scope for the current file."""
         if tok not in self.pz.table and not force:
             return None
@@ -815,7 +815,7 @@ class Engine:
 
 def _tagged(orig, view, s, e, n):
     """Binary records put a tag or length byte in front of a string, and that
-    byte can happen to be a letter or digit ("\x05OICUB3_020.PRT"). A match
+    byte can happen to be a letter or digit ("\x05OACME3_020.PRT"). A match
     is accepted behind one or two such bytes when they follow a
     non-printable byte and the match goes on like an identifier or file
     name (digit, underscore, dot or hyphen next)."""
