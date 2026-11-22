@@ -162,6 +162,10 @@ def main(argv):
     ap.add_argument("--strings", action="store_true")
     ap.add_argument("--dwg", action="store_true")
     ap.add_argument("--pdfmeta-all", action="store_true")
+    ap.add_argument("--names-whitelist", action="store_true")
+    ap.add_argument("--scope-terms", action="store_true", help="accepted for symmetry with transform.py (the re-check reads with the dictionary alone)")
+    ap.add_argument("--pdf-whitelist", action="store_true")
+    ap.add_argument("--pdf-inplace", action="store_true")
     ap.add_argument("--dwgobj", action="store_true")
     ap.add_argument("--scope", action="store_true")
     ap.add_argument("--pdfextra", action="store_true")
@@ -172,7 +176,7 @@ def main(argv):
                          "re-processing one kind of file in an already verified corpus")
     args = ap.parse_args(argv)
     opts = {"rename": args.rename, "pdftext": args.pdftext, "creo": args.creo, "zlb": args.zlb,
-            "strings": args.strings, "dwg": args.dwg, "dwgobj": args.dwgobj, "pdfmeta": args.pdfmeta_all, "scope": args.scope, "nofallback": True, "pdfextra": args.pdfextra,
+            "strings": args.strings, "dwg": args.dwg, "dwgobj": args.dwgobj, "pdfmeta": args.pdfmeta_all, "pdforder": args.pdf_inplace, "pdfwl": args.pdf_whitelist, "nameswl": args.names_whitelist, "scope": args.scope, "nofallback": True, "pdfextra": args.pdfextra,
             "previews": args.previews, "logos": args.logos}
     bad = 0
     # latest journal record per path

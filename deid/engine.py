@@ -186,7 +186,7 @@ class Engine:
             e.mask = "".join(mask)
             e.nchar = len(e.pseudo)
             self.entries.append(e)
-            e.groups = frozenset(d.get("g") or ()) if e.tier == "L" else None
+            e.groups = frozenset(d.get("g") or ()) if e.tier in ("L", "N") else None
             variants = set()
             toks = e.tokens
             exact = bool(d.get("x"))
@@ -260,7 +260,7 @@ class Engine:
         nfree = nfree8 = 0
         for k, v in keys.items():
             self.A.add_word(k, v)
-            if self.entries[v[0]].tier != "B":
+            if self.entries[v[0]].tier not in ("B", "N"):
                 self.F.add_word(k, v)
                 nfree += 1
                 if v[1] != "u16":
@@ -433,12 +433,17 @@ class Engine:
         return out
 
     # ------------------------------------------------------------------
+    naming = False    # True while a path is being mapped (file and folder names)
+
     def _free_ok(self, ent):
         """May this entry be replaced in free text of the current file?"""
         if ent.tier == "A":
             return True
         if ent.tier == "L" and self._home(ent):
             return True
+        if ent.tier == "N":
+            # a short part number: in the names of its source folder only
+            return self.naming and self._home(ent)
         return ent.eid in self.scoped
 
     def _home(self, ent):
@@ -702,8 +707,30 @@ class Engine:
             return (prev in _JOIN and prev != "") or (nxt in _JOIN and nxt != "")
         return True
 
+    wl = False        # also replace, by exclusion, every word that is not ordinary (see whitelist.py)
+
+    scope_terms = None    # matcher for the words of the current file's source name (see scopeterms.py)
+
     def spans_text(self, text, ctx="text"):
-        """Dictionary matches in a real string as (start, end, replacement)."""
+        """Dictionary matches in a real string as (start, end, replacement).
+        With `scope_terms` set, the words of the source's own name are
+        replaced wherever they stand. With `wl` set, free text also gets the
+        words replaced that are names by exclusion (drawing numbers, project
+        names, ...)."""
+        out = self._spans_dict(text, ctx)
+        if self.scope_terms is not None and ctx == "text" and text:
+            from . import scopeterms
+            out = scopeterms.merge(self, text, out)
+        if self.wl and ctx == "text" and text:
+            from . import whitelist
+            out = out + whitelist.spans(self, text, out)
+            out.sort()
+        if self.scope_terms is not None and ctx == "text" and out:
+            from . import scopeterms
+            out = scopeterms.guard(self, out)
+        return out
+
+    def _spans_dict(self, text, ctx="text"):
         if not text or not self.nkeys:
             return []
         view = norm_text(text)
@@ -727,6 +754,22 @@ class Engine:
 
     def replace_text(self, text, ctx="text"):
         """Replace dictionary matches in a real string. Returns (new, count)."""
+        if (self.wl or self.scope_terms is not None) and ctx == "text" and text:
+            spans = self.spans_text(text, ctx)
+            if not spans:
+                return text, 0
+            parts = []
+            pos = 0
+            cnt = 0
+            for s, e, rep in spans:
+                if s < pos:
+                    continue
+                parts.append(text[pos:s])
+                parts.append(rep)
+                pos = e
+                cnt += 1
+            parts.append(text[pos:])
+            return "".join(parts), cnt
         if not text or not self.nkeys:
             return text, 0
         view = norm_text(text)

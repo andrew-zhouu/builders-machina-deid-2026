@@ -20,7 +20,7 @@ from . import fmt_step, fmt_iges, fmt_sw, oleprops, engine as E
 from .build_dict import label_class, name_class
 
 OPTS = {"rename": False, "pdftext": False, "creo": False, "zlb": False, "strings": False, "dwg": False,
-        "dwgobj": False, "scope": False, "nofallback": False, "pdfmeta": False, "pdfextra": False, "pdfthumbs": True, "previews": False, "logos": None}
+        "dwgobj": False, "scope": False, "nofallback": False, "pdfmeta": False, "pdforder": False, "pdfwl": False, "nameswl": False, "pdfextra": False, "pdfthumbs": True, "previews": False, "logos": None}
 BLOB_RUN = 160
 _B64 = frozenset(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=")
 
@@ -331,6 +331,8 @@ def plan_text(eng, buf, n, kind, name="", anchors=True, fixed=False):
     strict = (fixed or kind == "iges" or text_ok is False
               or _u.split_ext(name) in ("sat", "sab", "x_t", "xmt_txt", "unv", "neu", "brep", "brp"))
     plan = eng.plan_bytes(buf, ids, text_ok, lo, hi, fixed=strict, wide=False, force_ids=_force(forced))
+    if kind == "step" and OPTS.get("nameswl") and names_by_exclusion(eng):
+        plan = plan + _step_names(eng, buf, n, plan)
     taken = set()
     for s, e, _nb in plan:
         taken.update(range(s, e))
@@ -346,6 +348,68 @@ def plan_text(eng, buf, n, kind, name="", anchors=True, fixed=False):
                     taken.add(o)
                     plan.append((o, o + 1, nb[i - s:i - s + 1]))
     return plan
+
+
+def names_by_exclusion(eng):
+    """Is the current file in a collection whose names are read by
+    exclusion (--names-whitelist)? There a drawing and the model it shows
+    are told apart and brought together by their number alone, so the
+    number has to change the same way wherever it is written."""
+    return (eng.group or "").startswith("sources/existing/")
+
+
+_STEP_STR = re.compile(rb"'([^'\n]{3,240})'")
+_STEP_ESC = re.compile(r"\\X[24]\\[0-9A-Fa-f]*\\X0\\|\\X\\[0-9A-Fa-f]{2}|\\S\\.|\\[PN]\\?[A-Z]?\\?")
+
+
+def _step_names(eng, buf, n, plan):
+    """Names in the string values of a STEP data section, read by exclusion:
+    the part number in a product name ('D482915_bracket') gets the
+    pseudonym it has in the file name and on the drawing. Same-length ASCII
+    replacements only; encoded text (\\X2\\...\\X0\\) is never touched."""
+    import bisect
+    from . import whitelist
+    start = buf.find(b"DATA;")
+    if start < 0:
+        return []
+    taken = sorted((s, e) for s, e, _nb in plan)
+    starts = [s for s, _e in taken]
+    cache = {}
+    out = []
+    for m in _STEP_STR.finditer(buf, start):
+        raw = m.group(1)
+        spans = cache.get(raw)
+        if spans is None:
+            spans = ()
+            if raw not in (b"NONE", b"none") and any(48 <= c <= 57 or c > 96 or 65 <= c <= 90 for c in raw):
+                try:
+                    text = raw.decode("ascii")
+                except UnicodeDecodeError:
+                    text = None
+                if text is not None:
+                    esc = [x.span() for x in _STEP_ESC.finditer(text)] if "\\" in text else []
+                    found = []
+                    for s, e, rep in whitelist.spans(eng, text):
+                        if len(rep) != e - s or not rep.isascii():
+                            continue
+                        if any(s < y and e > x for x, y in esc):
+                            continue
+                        found.append((s, e, rep.encode("ascii")))
+                    spans = tuple(found)
+            if len(cache) < 200000:
+                cache[raw] = spans
+        if not spans:
+            continue
+        base = m.start(1)
+        for s, e, nb in spans:
+            a, b = base + s, base + e
+            k = bisect.bisect_right(starts, a) - 1
+            if k >= 0 and taken[k][1] > a:
+                continue
+            if k + 1 < len(taken) and taken[k + 1][0] < b:
+                continue
+            out.append((a, b, nb))
+    return out
 
 
 def patch_file(src, dst, plan):
@@ -437,7 +501,8 @@ def replace_str(eng, s, ctx="text"):
         return s
     if ctx == "id":
         return eng.replace_text(s, "id")[0]
-    spans = [m.span(1) for m in _USERPATH_T.finditer(s)] + [m.span(1) for m in _EMAIL_T.finditer(s)]
+    users = set(m.span(1) for m in _USERPATH_T.finditer(s))
+    spans = sorted(users) + [m.span(1) for m in _EMAIL_T.finditer(s)]
     if not spans:
         return eng.replace_text(s, "text")[0]
     spans.sort()
@@ -447,7 +512,13 @@ def replace_str(eng, s, ctx="text"):
         if a < pos:
             continue
         out.append(eng.replace_text(s[pos:a], "text")[0])
-        out.append(eng.replace_text(s[a:b], "id")[0])
+        new = eng.replace_text(s[a:b], "id")[0]
+        if (new == s[a:b] and (a, b) in users and OPTS.get("scope") and not OPTS.get("nofallback")
+                and "://" not in s[:a] and not re.search(r"(?i)[a-z0-9.][\\/]home[\\/]+$", s[:a])):
+            # the user folder of a stored path is an account whatever it is
+            # called (but "site.org/home/about" is a web address)
+            new = eng.field_pseudonym(s[a:b], force=True)[0]
+        out.append(new)
         pos = b
     out.append(eng.replace_text(s[pos:], "text")[0])
     return "".join(out)
@@ -457,6 +528,16 @@ _EMAIL_ANY = re.compile(r"(?<![A-Za-z0-9._%+-])([A-Za-z0-9._%+-]{1,64})\s?@\s?([
 _PHONE_LABELLED = re.compile(
     r"(?i)\b(?:tel|telephone|phone|fax|mobile|mob|cell|t[ée]l[ée]phone|t[ée]l|telefon|tel[ée]fono|telefono|手机|电话)"
     r"\b\.?\s*[:：.]?\s*(\+?[\d(][\d\s().\-/]{6,22}\d)")
+# A telephone number that stands without a label: international form, area
+# code in brackets, or four or five groups of digits joined by dots. Nine to
+# fifteen digits; decimal numbers, dates and dimension lists do not fit.
+_PHONE_BARE = re.compile(
+    r"(?<![\w.,/+-])(?:"
+    r"\+\d{1,3}(?:[ .-]?\(?\d{1,4}\)?){2,6}"
+    r"|\(\d{2,5}\)[ .-]?\d{2,4}(?:[ .-]\d{2,4}){1,3}"
+    r"|\d{2,4}(?:\.\d{2,4}){3,4}"
+    r")(?![\w/-]|[.,]\d)")
+_HOST_USER = re.compile(r"^([^\\]+)\\([^\\(]+?)( \([^)]*\))?$")
 # "Drawn by: N. Surname", "Checked by: First Last": a person named after a
 # title-block label on the same line. The colon is required, and the value
 # must look like a name (initials and a surname, or two capitalised words).
@@ -496,6 +577,16 @@ def contact_spans(eng, text, taken=()):
     (start, end, replacement) spans that do not overlap `taken`."""
     from .build_dict import registrable
     out = []
+    if any(ch.isdigit() for ch in text):
+        for m in _PHONE_BARE.finditer(text):
+            a, b = m.span()
+            nd = sum(c.isdigit() for c in m.group(0))
+            if 9 <= nd <= 15 and all(e <= a or s >= b for s, e, *_r in taken):
+                new = eng.number_pseudonym(m.group(0))
+                if new != m.group(0):
+                    out.append((a, b, new))
+        if out:
+            taken = list(taken) + [(a, b) for a, b, _n in out]
     named = _NAME_LABELLED.search(text) if ":" in text or "：" in text else None
     low = text.lower()
     notice = ("propert" in low or "propie" in low or "propri" in low or "permission" in low or "consent" in low
@@ -661,12 +752,45 @@ def _shown_images(page, digests=True):
     the page drops entries that were never drawn."""
     try:
         out = []
+        pr = page.rect
         for i in page.get_image_info(hashes=digests):
-            bb = tuple(int(round(v)) for v in i.get("bbox", ()))
+            box = i.get("bbox", ())
+            if len(box) == 4 and (box[2] < pr.x0 - 1 or box[0] > pr.x1 + 1 or box[3] < pr.y0 - 1 or box[1] > pr.y1 + 1):
+                # drawn outside the page: nobody sees it, and a rewrite of the
+                # page content may or may not carry it along
+                continue
+            bb = tuple(int(round(v)) for v in box)
             out.append((bb, i.get("digest", b"") if digests else b""))
         return sorted(out)
     except Exception:
         return None
+
+
+def _same_look(page_was, page_now, was, now):
+    """True when the images that one list has and the other lacks make no
+    visible difference: an image that reaches into the page with a blank
+    strip only is dropped by a rewrite of the page content, and nobody can
+    tell. Nothing may be new, and where a missing image met the page the
+    two pages must render alike."""
+    try:
+        import pymupdf
+        if was is None or now is None or set(now) - set(was):
+            return False
+        for box, _digest in set(was) - set(now):
+            clip = pymupdf.Rect(box) & page_was.rect
+            if clip.is_empty or clip.width < 1 or clip.height < 1:
+                continue
+            a = page_was.get_pixmap(dpi=60, clip=clip, colorspace=pymupdf.csGRAY).samples
+            b = page_now.get_pixmap(dpi=60, clip=clip, colorspace=pymupdf.csGRAY).samples
+            if a != b:
+                return False
+        return True
+    except Exception:
+        return False
+
+
+WL_PAGES = 20        # pages of a document that are read by exclusion (--pdf-whitelist)
+WL_ITEMS = 600       # more replacements than this on one page: not a drawing, the dictionary alone decides
 
 
 def _pdf_visible_text(eng, src, tmp, notes=None):
@@ -681,9 +805,18 @@ def _pdf_visible_text(eng, src, tmp, notes=None):
     from . import pdftext
     skip = set()
     simple = set()       # pages whose lines could not be drawn again as a whole
+    pdftext.INPLACE = bool(OPTS.get("pdforder"))
+    wl_doc = bool(eng.wl)
+    plain = set()        # pages read with the dictionary only
+    failed_wl = set()    # pages that failed a check while read by exclusion
     for _attempt in range(60):
         total = 0
         failed = None
+        if _attempt >= 5 and wl_doc and failed_wl:
+            # this document keeps failing its page checks with the many
+            # replacements of the reading by exclusion: back to the dictionary
+            plain.update(failed_wl)
+        pdftext.MOVED[0] = pdftext.MOVED[1] = 0
         doc = pymupdf.open(src)
         try:
             if doc.needs_pass or doc.is_encrypted or doc.page_count > 3000:
@@ -691,7 +824,16 @@ def _pdf_visible_text(eng, src, tmp, notes=None):
             for page in doc:
                 if page.number in skip:
                     continue
+                # names by exclusion: on the first pages only (title pages and
+                # drawings; a long manual is not read word by word)
+                eng.wl = wl_doc and page.number < WL_PAGES and page.number not in plain
                 plan = pdftext.page_plan(eng, page, page.number not in simple)
+                if eng.wl and len(plan) > WL_ITEMS:
+                    # a page of nothing but names (a dependency graph, a parts
+                    # index): the dictionary alone decides there
+                    plain.add(page.number)
+                    eng.wl = False
+                    plan = pdftext.page_plan(eng, page, page.number not in simple)
                 if not plan:
                     continue
                 shown = _shown_images(page)
@@ -701,6 +843,8 @@ def _pdf_visible_text(eng, src, tmp, notes=None):
                         raise Unsafe("pdf page lost an image")
                 except Exception as ex:
                     failed = (page.number, "%s:%s" % (type(ex).__name__, str(ex)[:60]))
+                    if eng.wl:
+                        failed_wl.add(page.number)
                     break
                 total += n
             if failed is not None:
@@ -710,6 +854,11 @@ def _pdf_visible_text(eng, src, tmp, notes=None):
                 # characters replaced; otherwise the page is left alone.
                 if failed[0] not in simple and failed[1].startswith("ValueError"):
                     simple.add(failed[0])
+                    continue
+                if wl_doc and failed[0] in failed_wl and failed[0] not in plain:
+                    # once more with the dictionary alone (and whole lines again)
+                    plain.add(failed[0])
+                    simple.discard(failed[0])
                     continue
                 skip.add(failed[0])
                 if notes is not None:
@@ -733,6 +882,7 @@ def _pdf_visible_text(eng, src, tmp, notes=None):
             # content) are dropped by the qpdf rewrite that always follows.
             doc.save(tmp, garbage=0, deflate=True, no_new_id=True)
         finally:
+            eng.wl = wl_doc
             doc.close()
         # proof on the written file: every page still displays the same
         # images at the same places (same content too, unless logo images
@@ -747,7 +897,9 @@ def _pdf_visible_text(eng, src, tmp, notes=None):
                     orig = pymupdf.open(src)
                     try:
                         for num, _mem in want:
-                            if _shown_images(chk[num], not logos) != _shown_images(orig[num], not logos):
+                            now = _shown_images(chk[num], not logos)
+                            was = _shown_images(orig[num], not logos)
+                            if now != was and not _same_look(orig[num], chk[num], was, now):
                                 bad = num
                                 break
                     finally:
@@ -813,7 +965,11 @@ def h_pdf(eng, src, dst, name):
     scope, identities named by the document's own metadata are in scope from
     the start, and identities met while processing are swept once more."""
     if not OPTS.get("scope"):
-        return _h_pdf_once(eng, src, dst, name)
+        eng.wl = bool(OPTS.get("pdfwl")) and not OPTS.get("nofallback")
+        try:
+            return _h_pdf_once(eng, src, dst, name)
+        finally:
+            eng.wl = False
     # A file name printed in a drawing (its own number, the model it shows)
     # is kept exactly when the file keeps that name, as in every other
     # format: the drawing and the file it names must go on matching.
@@ -825,7 +981,14 @@ def _h_pdf_scoped(eng, src, dst, name):
     pdftext.CONTACTS = None if OPTS.get("nofallback") else contact_spans
     seen = set(eng.stats)
     eng.scope_promote(_pdf_scope(eng, src))
-    ch, info = _h_pdf_once(eng, src, dst, name)
+    # names by exclusion are replaced in the first pass only: their
+    # pseudonyms are no ordinary words either, and a second reading would
+    # replace them again
+    eng.wl = bool(OPTS.get("pdfwl")) and not OPTS.get("nofallback")
+    try:
+        ch, info = _h_pdf_once(eng, src, dst, name)
+    finally:
+        eng.wl = False
     if not ch:
         return ch, info
     if eng.scope_promote(set(k for k in eng.stats if k >= 0) - seen):
@@ -845,7 +1008,7 @@ def _h_pdf_scoped(eng, src, dst, name):
             if ch2:
                 info = dict(info)
                 info["n"] = info.get("n", 0) + info2.get("n", 0)
-                for k in ("pdftext", "pdfatt"):
+                for k in ("pdftext", "pdfatt", "pdfmoved", "pdflines"):
                     if info2.get(k):
                         info[k] = info.get(k, 0) + info2[k]
                 info["pdfpass"] = 2
@@ -889,10 +1052,14 @@ def _h_pdf_once(eng, src, dst, name):
     ntext = 0
     orig_src = src
     notes = []
+    moved = None
     if OPTS.get("pdftext"):
         tmp1 = dst + ".txt~"
         try:
             ntext = _pdf_visible_text(eng, src, tmp1, notes)
+            if OPTS.get("pdforder"):
+                from . import pdftext as _pt
+                moved = (_pt.MOVED[0], _pt.MOVED[1])
         except Exception as ex:
             ntext = 0
             notes.append("visible text kept (%s:%s)" % (type(ex).__name__, str(ex)[:60]))
@@ -931,6 +1098,10 @@ def _h_pdf_once(eng, src, dst, name):
         if notes:
             info = dict(info)
             info["pdfnote"] = "; ".join(notes[:6])
+        if moved and moved[1] and ch:
+            info = dict(info)
+            info["pdfmoved"] = moved[0]       # redrawn lines put back in place / redrawn lines
+            info["pdflines"] = moved[1]
         return ch, info
     finally:
         if src != orig_src:
@@ -1167,6 +1338,9 @@ def _xmp_words(eng, raw):
         return raw
 
 
+_PERSON_SHAPED = re.compile(r"^(?:[A-Z]\.\s?){1,2}[A-Z][A-Za-zÀ-ÿ'-]{2,}$")
+
+
 def _pdf_meta(eng, src, dst, name, ntext, orig_src):
     import pikepdf
     n = 0
@@ -1194,6 +1368,26 @@ def _pdf_meta(eng, src, dst, name, ntext, orig_src):
                             n += 1
                             if len(s) >= 3:
                                 fieldmap[s] = new
+                    elif eng.scope_terms is not None and str(k) in ("/Creator", "/Producer"):
+                        # the words of the source's own name are replaced here too (a project
+                        # named after the program it is drawn with)
+                        from . import scopeterms
+                        s = str(v)
+                        sp = scopeterms.guard(eng, scopeterms.merge(eng, s, ()))
+                        if sp:
+                            parts = []
+                            pos = 0
+                            for a0, b0, rep in sp:
+                                parts.append(s[pos:a0])
+                                parts.append(rep)
+                                pos = b0
+                            parts.append(s[pos:])
+                            new = "".join(parts)
+                            if new != s:
+                                info[k] = pikepdf.String(new)
+                                n += 1
+                                if len(s) >= 3:
+                                    fieldmap[s] = new
                     continue
                 s = str(v)
                 key = str(k).lstrip("/")
@@ -1207,6 +1401,16 @@ def _pdf_meta(eng, src, dst, name, ntext, orig_src):
                             fieldmap[s] = new
                     continue
                 new = replace_str(eng, s, ctx)
+                if (new == s and key in ("Keywords", "Subject") and OPTS.get("scope")
+                        and not OPTS.get("nofallback") and _PERSON_SHAPED.match(s.strip())):
+                    # a person's name parked in a descriptive field ("M. Surname")
+                    cand, toks = eng.field_pseudonym(s)
+                    if toks:
+                        cand, toks = eng.field_pseudonym(s, force=True)
+                        if toks and cand != s:
+                            new = cand
+                            ctx = "id"            # the XMP copies of this value follow it
+                            eng.scope_tokens(toks)
                 if new == s and ctx == "id" and OPTS.get("scope") and not OPTS.get("nofallback"):
                     new, toks = eng.field_pseudonym(s)
                     if toks:
@@ -1214,6 +1418,15 @@ def _pdf_meta(eng, src, dst, name, ntext, orig_src):
                     elif label_class("pdf.info." + key.lower()) in ("PERSON", "ACCOUNT"):
                         # an author that looks like a role or a product is still the author
                         new, _t = eng.field_pseudonym(s, force=True)
+                if ctx == "id" and "\\" in s and len(new) == len(s) and not OPTS.get("nofallback"):
+                    # "MACHINE\\account (MACHINE)": the account is always pseudonymised, also when
+                    # it reads like a role (Owner, Administrator, User)
+                    m0 = _HOST_USER.match(s)
+                    m1 = _HOST_USER.match(new)
+                    if m0 and m1 and m0.span(2) == m1.span(2) and m0.group(2) == m1.group(2):
+                        pu = eng.words_pseudonym(m0.group(2))
+                        if pu != m0.group(2) and len(pu) == len(m0.group(2)):
+                            new = new[:m1.start(2)] + pu + new[m1.end(2):]
                 if new != s:
                     info[k] = pikepdf.String(new)
                     n += 1

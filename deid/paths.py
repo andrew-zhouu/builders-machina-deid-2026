@@ -18,6 +18,9 @@ _HASH = re.compile(r"^[0-9a-f]{7,40}$")
 _VERSION = re.compile(r"(\.\d+)$")
 
 
+WL_PDF = False        # set by the transform: PDF file names are read by exclusion as well
+WL_ALL = None         # callable(rel) -> bool: every name below the top folder is read by exclusion
+
 _EXTENSION = re.compile(r"^[A-Za-z0-9_~$]{1,12}$")
 
 
@@ -38,7 +41,14 @@ def split_name(base):
 
 
 def _text(eng, s, ctx="text"):
-    return eng.replace_text(s, ctx)[0] if s else s
+    if not s:
+        return s
+    saved = eng.naming
+    eng.naming = True          # names: short part numbers count here (tier N)
+    try:
+        return eng.replace_text(s, ctx)[0]
+    finally:
+        eng.naming = saved
 
 
 def rename_file_component(eng, comp):
@@ -125,23 +135,55 @@ def map_path(eng, rel, level="all"):
     out.append(rename_top(eng, parts[1], parts[2], level == "owner"))
     if level != "all":
         return "/".join(out + parts[3:])
+    if WL_ALL is not None and WL_ALL(rel):
+        # drawings and the models they show sit side by side: all their
+        # names are read the same way, so a number keeps one pseudonym
+        saved = eng.wl
+        eng.wl = True
+        try:
+            for c in parts[3:-1]:
+                out.append(rename_dir_component(eng, c))
+            out.append(rename_file_component(eng, parts[-1]))
+        finally:
+            eng.wl = saved
+        return "/".join(out)
     for c in parts[3:-1]:
         out.append(rename_dir_component(eng, c))
-    out.append(rename_file_component(eng, parts[-1]))
+    if WL_PDF and parts[-1].lower().endswith(".pdf"):
+        # the name of a drawing is read like its text: its number and the
+        # names in it are replaced by exclusion
+        saved = eng.wl
+        eng.wl = True
+        try:
+            out.append(rename_file_component(eng, parts[-1]))
+        finally:
+            eng.wl = saved
+    else:
+        out.append(rename_file_component(eng, parts[-1]))
     return "/".join(out)
 
 
 def map_member(eng, name):
-    """New name for an archive member path (forward slashes)."""
+    """New name for an archive member path (forward slashes). The members
+    of an archive are named like the files next to it: in a collection whose
+    names are read by exclusion every member name is, elsewhere the names of
+    PDF members are."""
     parts = name.split("/")
+    everything = WL_ALL is not None and WL_ALL((eng.group or "") + "/")
     out = []
-    for i, c in enumerate(parts):
-        if not c:
-            out.append(c)
-        elif i == len(parts) - 1:
-            out.append(rename_file_component(eng, c))
-        else:
-            out.append(rename_dir_component(eng, c))
+    saved = eng.wl
+    try:
+        for i, c in enumerate(parts):
+            if not c:
+                out.append(c)
+            elif i == len(parts) - 1:
+                eng.wl = saved or everything or (WL_PDF and c.lower().endswith(".pdf"))
+                out.append(rename_file_component(eng, c))
+            else:
+                eng.wl = saved or everything
+                out.append(rename_dir_component(eng, c))
+    finally:
+        eng.wl = saved
     return "/".join(out)
 
 

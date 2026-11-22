@@ -49,8 +49,11 @@ class Region:
 # --------------------------------------------------------------------------
 _SEP = b"\\/"
 _COMP_BAD = set(b'\\/:*?"<>|\r\n\x00\'')
-_USER_ANCHORS = (b"Users", b"USERS", b"users", b"Documents and Settings", b"DOCUME~1",
+_USER_ANCHORS = (b"Users", b"USERS", b"users", b"Documents and Settings", b"documents and settings",
+                 b"DOCUMENTS AND SETTINGS", b"DOCUME~1", b"docume~1",
                  b"Dokumente und Einstellungen", b"/home/")
+_PROFILE_ROOTS = (b"DOCUME~1", b"docume~1", b"Documents and Settings", b"documents and settings",
+                  b"DOCUMENTS AND SETTINGS", b"Dokumente und Einstellungen")
 
 
 def _component(buf, j, n, maxlen=64):
@@ -84,7 +87,7 @@ def scan_userpaths(buf, n=None, lo=0):
                 ok = True
             else:
                 ok = i > 0 and buf[i - 1] in _SEP
-                if ok and anc in (b"DOCUME~1", b"Documents and Settings", b"Dokumente und Einstellungen"):
+                if ok and anc in _PROFILE_ROOTS:
                     # only directly under a drive root; "...\\<user>\\DOCUME~1" is the
                     # user's own Documents folder, not the profile directory
                     k0 = i - 1

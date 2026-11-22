@@ -31,7 +31,8 @@ MAX_DEPTH = 4
 _ENGINE = None
 _TMPROOT = None
 OPTS = {"rename": False, "pdftext": False, "creo": False, "zlb": False, "strings": False, "dwg": False,
-        "pdfextra": False, "dwgobj": False, "scope": False, "nofallback": False, "pdfmeta": False}
+        "pdfextra": False, "dwgobj": False, "scope": False, "nofallback": False, "pdfmeta": False, "pdforder": False, "pdfwl": False, "nameswl": False,
+        "scopeterms": False}
 TEXT_KINDS = ("step", "iges", "dxf", "svg", "text")
 
 
@@ -80,10 +81,12 @@ def _nested(name, data, depth=1):
         with open(src, "wb") as fh:
             fh.write(data)
         state = _ENGINE.scope_save()          # the enclosing document's scope must survive
+        terms = _ENGINE.scope_terms
         try:
             ch, _kind, _info = process(_ENGINE.group + "/embedded!/" + base, src, dst, depth)
         finally:
             _ENGINE.scope_restore(state)
+            _ENGINE.scope_terms = terms
         if not ch:
             return None
         with open(dst, "rb") as fh:
@@ -104,8 +107,13 @@ def process(logical, src, dst, depth=0):
     except OSError as ex:
         return False, "?", {"error": "read:%s" % ex}
     kind = util.kind_of(name, head)
+    eng.scope_terms = None
     if size == 0:
         return False, kind, {}
+    if kind == "pdf" and OPTS.get("scopeterms") and not OPTS.get("nofallback"):
+        # the words of the source's own name (account, project, site, collection) are names in its PDFs
+        from deid import scopeterms
+        eng.scope_terms = scopeterms.compiled(logical)
     # Scope: the identities named by the file's source folder (and by the
     # folders that hold copies of it) are removed from its contents too,
     # whatever their tier. The same group-level scope is used when paths are
@@ -394,6 +402,8 @@ def _work(item):
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         if os.path.lexists(dst):
             os.unlink(dst)
+        from deid import scopeterms as _st
+        _st.CURRENT[0], _st.CURRENT[1] = rel, out_rel
         ch, kind, info = process(rel, src, dst)
         if not ch:
             os.link(src, dst)
@@ -449,6 +459,19 @@ def main(argv):
     ap.add_argument("--pdfmeta-all", action="store_true",
                     help="PDF: pseudonymise every descriptive metadata value word by word (title, subject, "
                          "keywords, producing software), not only the identity fields")
+    ap.add_argument("--names-whitelist", action="store_true",
+                    help="organisers' collections (sources/existing): file and folder names and the names in STEP "
+                         "data are read by exclusion as well, so a drawing and its model keep one number")
+    ap.add_argument("--scope-terms", action="store_true",
+                    help="PDFs: the words of the source's own name (account, project, site, collection) are replaced "
+                         "wherever they stand in text and descriptive metadata (see scopeterms.py)")
+    ap.add_argument("--pdf-whitelist", action="store_true",
+                    help="PDF: besides the dictionary identities, replace every word of page text, metadata and "
+                         "of the PDF's file name that is not ordinary vocabulary, a number or a standard "
+                         "designation (drawing and part numbers, project and product names)")
+    ap.add_argument("--pdf-inplace", action="store_true",
+                    help="PDF: put redrawn text lines back at the place of the old text in the page content, "
+                         "so that the drawing order of the page text stays what it was")
     ap.add_argument("--dwgobj", action="store_true",
                     help="also edit text inside DWG object data (bit level, per-object CRC kept valid)")
     ap.add_argument("--logos", default=None,
@@ -461,8 +484,8 @@ def main(argv):
                     help="edit text runs (paths, user names) in otherwise unparsed streams of native files")
     args = ap.parse_args(argv)
     opts = {"rename": args.rename, "pdftext": args.pdftext, "creo": args.creo, "zlb": args.zlb,
-            "strings": args.strings, "dwg": args.dwg, "dwgobj": args.dwgobj, "pdfmeta": args.pdfmeta_all, "scope": args.scope, "nofallback": args.no_field_fallback, "pdfextra": args.pdfextra,
-            "previews": args.previews, "logos": args.logos}
+            "strings": args.strings, "dwg": args.dwg, "dwgobj": args.dwgobj, "pdfmeta": args.pdfmeta_all, "pdforder": args.pdf_inplace, "pdfwl": args.pdf_whitelist, "nameswl": args.names_whitelist, "scope": args.scope, "nofallback": args.no_field_fallback, "pdfextra": args.pdfextra,
+            "previews": args.previews, "logos": args.logos, "scopeterms": args.scope_terms}
     os.makedirs(args.out, exist_ok=True)
     tmproot = os.path.join(util.WORK, "tmp")
     os.makedirs(tmproot, exist_ok=True)
@@ -483,6 +506,9 @@ def main(argv):
     out_rel = {rel: rel for rel, _s in files}
     if args.rename:
         from deid import paths as P
+        P.WL_PDF = bool(args.pdf_whitelist)
+        if args.names_whitelist:
+            P.WL_ALL = lambda rel: rel.startswith("sources/existing/")
         _init(args.dict, args.key, tmproot, opts)
         taken = {}
         for rel, new in P.map_all(_ENGINE, [r for r, _s in util.walk_input()], args.rename, bool(args.scope)):
